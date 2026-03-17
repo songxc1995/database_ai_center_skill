@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zabbix Readonly"
+  short_description: "Fetch read-only Zabbix host performance and problem context"
+  default_prompt: "Query Zabbix by host IP in read-only mode, return structured host performance facts, and stop on ambiguous host matches."

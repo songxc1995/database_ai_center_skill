@@ -51,6 +51,15 @@ Defaults:
 
 - `time_range_minutes=60`
 
+## Script
+Preferred executable:
+
+```bash
+python3 scripts/query_zabbix_context.py --host-ip 10.99.127.61
+```
+
+Use this script when the model runtime supports local script execution. It provides deterministic host resolution, ambiguity handling, and compact structured output.
+
 ## Workflow
 1. If `zabbix_hostid` is provided, call `host.get` and use it directly.
 2. Else call `hostinterface.get` with `host_ip`.
