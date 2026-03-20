@@ -7,6 +7,7 @@ This repository contains two skills for external model platforms that can make o
 - `database-ai-center/`
   - Primary alert-analysis skill
   - Reads live alerts and AI context from Database AI Center
+  - Reads paginated `/alerts` responses and prefers normalized `diagnosis_report` fields when present
   - Produces the final Chinese diagnosis
   - Optionally enriches the diagnosis with `zabbix-readonly`
 
@@ -39,5 +40,7 @@ ZABBIX_VERIFY_TLS=true
 ## Recommended Usage
 
 1. Trigger `database-ai-center` for alert analysis.
-2. Let the model use `zabbix-readonly` only when host-side evidence is needed.
-3. Keep the final diagnosis unified in `database-ai-center`.
+2. Let it fetch alerts via `GET /alerts?page=1&page_size=<n>` and select from the returned `items`.
+3. Let it prefer normalized diagnosis fields (`severity`, `recommendations`, `diagnosis_report`) while still tolerating older deployments that only expose `risk_level` and `actions`.
+4. Let the model use `zabbix-readonly` only when host-side evidence is needed.
+5. Keep the final diagnosis unified in `database-ai-center`.
