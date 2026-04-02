@@ -1,4 +1,4 @@
 interface:
   display_name: "Database AI Center"
   short_description: "Analyze database alerts and optionally enrich with Zabbix facts"
-  default_prompt: "Analyze live Database AI Center alerts, prioritize structured AI context evidence such as root_cause_candidates, replication or storage pressure, and Oracle long-running sessions, and use zabbix-readonly only when host-side evidence is needed before returning the final structured diagnosis."
+  default_prompt: "Analyze live Database AI Center alerts for Database AI Center v2.0.8+, first reading /alerts, then /alerts/{alert_id}/ai-detail, then /ai/context/{instance_id}. Prioritize diagnosis_report, alert_evidence_items, and root_cause_candidates.evidence_items as the primary structured evidence sources, emit a Chinese diagnosis using evidence_schema_version=v1 and evidence item objects, and use zabbix-readonly only when host-side evidence is needed."
