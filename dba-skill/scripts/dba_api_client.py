@@ -1,0 +1,406 @@
+#!/usr/bin/env python3
+"""Small read-oriented client for Database AI Center DBA APIs."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from typing import Any
+
+
+READ_TIMEOUT_DEFAULT = 15
+
+
+def _env(name: str, default: str | None = None) -> str | None:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip()
+
+
+def _base_url() -> str:
+    value = _env("PROJECT_API_BASE_URL")
+    if not value:
+        _fail("missing_config", "PROJECT_API_BASE_URL is required", exit_code=2)
+    return value.rstrip("/")
+
+
+def _api_key() -> str:
+    value = _env("PROJECT_API_KEY")
+    if not value:
+        _fail("missing_config", "PROJECT_API_KEY is required", exit_code=2)
+    return value
+
+
+def _timeout() -> float:
+    raw = _env("PROJECT_TIMEOUT_SECONDS", str(READ_TIMEOUT_DEFAULT))
+    try:
+        value = float(raw or READ_TIMEOUT_DEFAULT)
+    except ValueError:
+        _fail("invalid_config", "PROJECT_TIMEOUT_SECONDS must be numeric", exit_code=2)
+    if value <= 0:
+        _fail("invalid_config", "PROJECT_TIMEOUT_SECONDS must be greater than 0", exit_code=2)
+    return value
+
+
+def _redact(value: str) -> str:
+    key = os.environ.get("PROJECT_API_KEY")
+    if key:
+        value = value.replace(key, "<redacted>")
+    return value
+
+
+def _fail(error: str, message: str, *, exit_code: int = 1, **extra: Any) -> None:
+    payload = {"error": error, "message": _redact(message), **extra}
+    sys.stderr.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    raise SystemExit(exit_code)
+
+
+def _print_json(payload: Any) -> None:
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+
+
+def _bool(value: bool) -> str:
+    return "true" if value else "false"
+
+
+def _add_if(params: dict[str, str], key: str, value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, str) and value == "":
+        return
+    if isinstance(value, bool):
+        if value:
+            params[key] = _bool(value)
+        return
+    params[key] = str(value)
+
+
+def _clean_params(values: dict[str, Any]) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for key, value in values.items():
+        _add_if(params, key, value)
+    return params
+
+
+def _checks(raw: str) -> list[str]:
+    checks = [part.strip() for part in raw.split(",") if part.strip()]
+    if not checks:
+        _fail("invalid_argument", "--checks must contain at least one check id", exit_code=2)
+    return checks
+
+
+def _request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
+    base = _base_url()
+    token = _api_key()
+    query = urllib.parse.urlencode(_clean_params(params or {}))
+    url = f"{base}{path}"
+    if query:
+        url = f"{url}?{query}"
+    data = None
+    headers = {
+        "Accept": "application/json",
+        "User-Agent": "dba-skill-client",
+        "X-API-Key": token,
+    }
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=_timeout()) as response:
+            raw = response.read()
+            if not raw:
+                return None
+            return json.loads(raw.decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raw = exc.read().decode("utf-8", errors="replace")
+        _fail(
+            "http_error",
+            f"{method} {path} returned HTTP {exc.code}",
+            status_code=exc.code,
+            response=_redact(raw),
+        )
+    except urllib.error.URLError as exc:
+        _fail("network_error", f"{method} {path} failed: {exc.reason}")
+    except TimeoutError:
+        _fail("network_error", f"{method} {path} timed out")
+    except json.JSONDecodeError as exc:
+        _fail("invalid_json", f"{method} {path} returned invalid JSON: {exc}")
+
+
+def _common_filters(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--tenant-id")
+    parser.add_argument("--instance-type")
+    parser.add_argument("--instance-id", type=int)
+    parser.add_argument("--department")
+    parser.add_argument("--service-domain")
+    parser.add_argument("--business")
+    parser.add_argument("--contact-person")
+    parser.add_argument("--technical-contact")
+    parser.add_argument("--contact")
+    parser.add_argument("--contact-role", choices=["any", "application", "technical"])
+    parser.add_argument("--q")
+
+
+def _common_filter_params(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "tenant_id": args.tenant_id,
+        "instance_type": args.instance_type,
+        "instance_id": args.instance_id,
+        "department": args.department,
+        "service_domain": args.service_domain,
+        "business": args.business,
+        "contact_person": args.contact_person,
+        "technical_contact": args.technical_contact,
+        "contact": args.contact,
+        "contact_role": args.contact_role,
+        "q": args.q,
+    }
+
+
+def cmd_resolve(args: argparse.Namespace) -> Any:
+    params = _common_filter_params(args)
+    params.update(
+        {
+            "host": args.host,
+            "ip": args.ip,
+            "instance_name": args.instance_name,
+            "database_name": args.database_name,
+            "alert_id": args.alert_id,
+            "limit": args.limit,
+        }
+    )
+    return _request("GET", "/dba/resolve", params=params)
+
+
+def cmd_context(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/dba/context",
+        params={
+            "alert_id": args.alert_id,
+            "instance_id": args.instance_id,
+            "database_id": args.database_id,
+            "refresh_ai_context": args.refresh_ai_context,
+            "stale_after_hours": args.stale_after_hours,
+        },
+    )
+
+
+def cmd_alert_evidence(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        f"/dba/alerts/{args.alert_id}/evidence",
+        params={"before_hours": args.before_hours, "after_hours": args.after_hours},
+    )
+
+
+def cmd_inventory_summary(args: argparse.Namespace) -> Any:
+    params = _common_filter_params(args)
+    params.update(
+        {
+            "include_system_dbs": args.include_system_dbs,
+            "stale_after_hours": args.stale_after_hours,
+        }
+    )
+    return _request("GET", "/dba/inventory/summary", params=params)
+
+
+def cmd_databases_search(args: argparse.Namespace) -> Any:
+    params = _common_filter_params(args)
+    params.update(
+        {
+            "status": args.status,
+            "include_inactive": args.include_inactive,
+            "include_system_dbs": args.include_system_dbs,
+            "is_in_use": args.is_in_use,
+            "limit": args.limit,
+            "offset": args.offset,
+        }
+    )
+    return _request("GET", "/dba/databases/search", params=params)
+
+
+def cmd_databases_unused(args: argparse.Namespace) -> Any:
+    params = _common_filter_params(args)
+    params.update({"include_inactive": args.include_inactive, "limit": args.limit})
+    return _request("GET", "/dba/databases/unused", params=params)
+
+
+def cmd_ownership_scope(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/dba/ownership/scope",
+        params={
+            "contact": args.contact,
+            "contact_role": args.contact_role,
+            "department": args.department,
+            "service_domain": args.service_domain,
+            "business": args.business,
+            "tenant_id": args.tenant_id,
+            "include_inactive": args.include_inactive,
+            "include_system_dbs": args.include_system_dbs,
+            "stale_after_hours": args.stale_after_hours,
+        },
+    )
+
+
+def cmd_directory_options(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/dba/directory/options",
+        params={
+            "type": args.type,
+            "search": args.search,
+            "include_inactive": args.include_inactive,
+            "limit": args.limit,
+        },
+    )
+
+
+def cmd_freshness(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        f"/dba/instances/{args.instance_id}/freshness",
+        params={"stale_after_hours": args.stale_after_hours},
+    )
+
+
+def cmd_timeline(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        f"/dba/instances/{args.instance_id}/timeline",
+        params={"hours": args.hours, "limit": args.limit},
+    )
+
+
+def cmd_diagnostics_catalog(args: argparse.Namespace) -> Any:
+    return _request("GET", f"/dba/instances/{args.instance_id}/diagnostics/catalog")
+
+
+def cmd_diagnostics_run(args: argparse.Namespace) -> Any:
+    if args.sql:
+        _fail(
+            "free_form_sql_not_supported",
+            "diagnostics-run only accepts catalog check ids; free-form SQL is not supported",
+            exit_code=2,
+        )
+    body: dict[str, Any] = {"checks": _checks(args.checks)}
+    if args.timeout_seconds is not None:
+        body["timeout_seconds"] = args.timeout_seconds
+    if args.database_name:
+        body["database_name"] = args.database_name
+    return _request("POST", f"/dba/instances/{args.instance_id}/diagnostics/run", body=body)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    resolve = sub.add_parser("resolve")
+    _common_filters(resolve)
+    resolve.add_argument("--host")
+    resolve.add_argument("--ip")
+    resolve.add_argument("--instance-name")
+    resolve.add_argument("--database-name")
+    resolve.add_argument("--alert-id", type=int)
+    resolve.add_argument("--limit", type=int)
+    resolve.set_defaults(func=cmd_resolve)
+
+    context = sub.add_parser("context")
+    context.add_argument("--alert-id", type=int)
+    context.add_argument("--instance-id", type=int)
+    context.add_argument("--database-id", type=int)
+    context.add_argument("--refresh-ai-context", action="store_true")
+    context.add_argument("--stale-after-hours", type=int)
+    context.set_defaults(func=cmd_context)
+
+    alert_evidence = sub.add_parser("alert-evidence")
+    alert_evidence.add_argument("--alert-id", type=int, required=True)
+    alert_evidence.add_argument("--before-hours", type=int)
+    alert_evidence.add_argument("--after-hours", type=int)
+    alert_evidence.set_defaults(func=cmd_alert_evidence)
+
+    inventory = sub.add_parser("inventory-summary")
+    _common_filters(inventory)
+    inventory.add_argument("--include-system-dbs", action="store_true")
+    inventory.add_argument("--stale-after-hours", type=int)
+    inventory.set_defaults(func=cmd_inventory_summary)
+
+    search = sub.add_parser("databases-search")
+    _common_filters(search)
+    search.add_argument("--status")
+    search.add_argument("--include-inactive", action="store_true")
+    search.add_argument("--include-system-dbs", action="store_true")
+    search.add_argument("--is-in-use", choices=["true", "false"])
+    search.add_argument("--limit", type=int)
+    search.add_argument("--offset", type=int)
+    search.set_defaults(func=cmd_databases_search)
+
+    unused = sub.add_parser("databases-unused")
+    _common_filters(unused)
+    unused.add_argument("--include-inactive", action="store_true")
+    unused.add_argument("--limit", type=int)
+    unused.set_defaults(func=cmd_databases_unused)
+
+    scope = sub.add_parser("ownership-scope")
+    scope.add_argument("--contact")
+    scope.add_argument("--contact-role", choices=["any", "application", "technical"])
+    scope.add_argument("--department")
+    scope.add_argument("--service-domain")
+    scope.add_argument("--business")
+    scope.add_argument("--tenant-id")
+    scope.add_argument("--include-inactive", action="store_true")
+    scope.add_argument("--include-system-dbs", action="store_true")
+    scope.add_argument("--stale-after-hours", type=int)
+    scope.set_defaults(func=cmd_ownership_scope)
+
+    directory = sub.add_parser("directory-options")
+    directory.add_argument("--type", choices=["contact", "department", "application"], required=True)
+    directory.add_argument("--search")
+    directory.add_argument("--include-inactive", action="store_true")
+    directory.add_argument("--limit", type=int)
+    directory.set_defaults(func=cmd_directory_options)
+
+    freshness = sub.add_parser("freshness")
+    freshness.add_argument("--instance-id", type=int, required=True)
+    freshness.add_argument("--stale-after-hours", type=int)
+    freshness.set_defaults(func=cmd_freshness)
+
+    timeline = sub.add_parser("timeline")
+    timeline.add_argument("--instance-id", type=int, required=True)
+    timeline.add_argument("--hours", type=int)
+    timeline.add_argument("--limit", type=int)
+    timeline.set_defaults(func=cmd_timeline)
+
+    catalog = sub.add_parser("diagnostics-catalog")
+    catalog.add_argument("--instance-id", type=int, required=True)
+    catalog.set_defaults(func=cmd_diagnostics_catalog)
+
+    run = sub.add_parser("diagnostics-run")
+    run.add_argument("--instance-id", type=int, required=True)
+    run.add_argument("--checks", required=True)
+    run.add_argument("--timeout-seconds", type=int)
+    run.add_argument("--database-name")
+    run.add_argument("--sql", help=argparse.SUPPRESS)
+    run.set_defaults(func=cmd_diagnostics_run)
+
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    payload = args.func(args)
+    _print_json(payload)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

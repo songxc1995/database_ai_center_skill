@@ -1,33 +1,30 @@
 # Database AI Center Skills
 
-This repository contains two skills for external model platforms that can make outbound HTTP requests.
+This repository contains skills for external model platforms that can make outbound HTTP requests.
 
 ## Skills
 
-- `database-ai-center/`
-  - Primary alert-analysis skill
-  - Reads live alerts, AI detail, and AI context from Database AI Center
-  - Uses `GET /alerts`, `GET /alerts/{alert_id}/ai-detail`, and `GET /ai/context/{instance_id}`
-  - Prefers `diagnosis_report`, `alert_evidence_items`, and `root_cause_candidates[*].evidence_items`
-  - Emits and dispatches v1 evidence items instead of legacy string evidence
-  - Produces the final Chinese diagnosis
-  - Optionally enriches the diagnosis with `zabbix-readonly`
+- `dba-skill/`
+  - Replaces the former `database-ai-center/` alert-only skill.
+  - Uses Database AI Center `v2.0.21+` `/api/v2/dba/*` APIs.
+  - Answers database estate statistics, unused database, inactive discovery, ownership, contact, department, business/application, alert evidence, freshness, timeline, and allowlisted diagnostic questions.
+  - Includes `scripts/dba_api_client.py` to make common DBA API calls safely.
+  - Optionally enriches analysis with `zabbix-readonly` for host-side evidence.
 
 - `zabbix-readonly/`
-  - Read-only Zabbix helper skill
-  - Resolves a host by IP, optionally disambiguates by host name
-  - Returns structured host-side performance evidence
+  - Read-only Zabbix helper skill.
+  - Resolves a host by IP, optionally disambiguates by host name.
+  - Returns structured host-side performance evidence.
 
 ## Runtime Config
 
-Database AI Center:
+DBA Skill:
 
 ```env
 PROJECT_API_BASE_URL=http://your-database-ai-center/api/v2
 PROJECT_API_KEY=replace-with-real-api-key
-PROJECT_WEBHOOK_TARGET_ID=1
-PROJECT_ALERT_ID=
-PROJECT_ALERT_LIMIT=20
+PROJECT_TIMEOUT_SECONDS=15
+PROJECT_STALE_AFTER_HOURS=72
 ```
 
 Zabbix:
@@ -41,24 +38,22 @@ ZABBIX_VERIFY_TLS=true
 
 ## Recommended Usage
 
-1. Trigger `database-ai-center` for alert analysis.
-2. Let it fetch alerts via `GET /alerts?page=1&page_size=<n>` and select from the returned `items`.
-3. Let it fetch `GET /alerts/{alert_id}/ai-detail` for normalized `diagnosis_report` and `alert_evidence_items`.
-4. Let it fetch `GET /ai/context/{instance_id}` for `root_cause_candidates`, `explainability`, and `latest_metrics`.
-5. Let it emit the final analysis as a v1 evidence-based diagnosis payload.
-6. Let the model use `zabbix-readonly` only when host-side evidence is needed.
-7. Keep the final diagnosis unified in `database-ai-center`.
+1. Trigger `dba-skill` for DBA inventory, ownership, unused database, alert evidence, freshness, and diagnostic questions.
+2. Use `dba-skill/scripts/dba_api_client.py` when local script execution is available.
+3. Use `/dba/directory/options`, `/dba/databases/search`, `/dba/ownership/scope`, `/dba/inventory/summary`, and `/dba/databases/unused` for asset questions.
+4. Use `/dba/resolve`, `/dba/alerts/{alert_id}/evidence`, `/dba/context`, `/dba/instances/{id}/freshness`, and diagnostics endpoints for alert analysis.
+5. Use `zabbix-readonly` only when host-side CPU, memory, disk, filesystem, load, or I/O evidence is needed.
 
 ## Handoff
 
-- Self-contained external model handoff: `database-ai-center/HANDOFF.md`
-- Main skill prompt and workflow: `database-ai-center/SKILL.md`
+- External model handoff: `dba-skill/HANDOFF.md`
+- Main skill prompt and workflow: `dba-skill/SKILL.md`
+- DBA API reference: `dba-skill/references/dba_api.md`
 
 ## Compatibility Notes
 
-- This repository targets Database AI Center `v2.0.8+`.
-- The primary skill depends on `GET /alerts`, `GET /alerts/{alert_id}/ai-detail`, and `GET /ai/context/{instance_id}`.
-- It does not require direct calls to metrics-series endpoints or collection/discovery operations APIs.
-- The skill emits v1 evidence items by default. The service may still normalize legacy evidence on dispatch, but this repository does not treat legacy evidence strings as the primary contract.
-- Recent Database AI Center releases may describe Oracle pressure using long-running sessions rather than `slow_queries` semantics.
-- This repository does not need an Oracle JDBC agent rebuild for prompt-only compatibility updates.
+- This repository targets Database AI Center `v2.0.21+`.
+- The former `database-ai-center` skill name is retired in favor of `dba-skill`.
+- The main path no longer depends on legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}`.
+- Diagnostics never accepts free-form SQL; use catalog `check_id` values only.
+- Skill outputs and errors must not expose API keys, database credentials, tokens, encrypted secrets, usernames, or connection strings.
