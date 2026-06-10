@@ -10,13 +10,60 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 from typing import Any
 
 
 READ_TIMEOUT_DEFAULT = 15
+ENV_FILE_NAMES = (".env",)
+ENV_ALLOWLIST = {
+    "PROJECT_API_BASE_URL",
+    "PROJECT_API_KEY",
+    "PROJECT_TIMEOUT_SECONDS",
+    "PROJECT_STALE_AFTER_HOURS",
+}
+_ENV_FILES_LOADED = False
+
+
+def _unquote_env_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _load_env_files() -> None:
+    global _ENV_FILES_LOADED
+    if _ENV_FILES_LOADED:
+        return
+    _ENV_FILES_LOADED = True
+
+    try:
+        search_roots = (Path.cwd().resolve(), *Path.cwd().resolve().parents)
+    except OSError:
+        return
+
+    for directory in search_roots:
+        for filename in ENV_FILE_NAMES:
+            path = directory / filename
+            if not path.is_file():
+                continue
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                key, separator, value = line.partition("=")
+                key = key.strip()
+                if separator != "=" or key not in ENV_ALLOWLIST:
+                    continue
+                os.environ[key] = _unquote_env_value(value)
+            return
 
 
 def _env(name: str, default: str | None = None) -> str | None:
+    _load_env_files()
     value = os.environ.get(name)
     if value is None or value.strip() == "":
         return default
@@ -93,6 +140,16 @@ def _checks(raw: str) -> list[str]:
     if not checks:
         _fail("invalid_argument", "--checks must contain at least one check id", exit_code=2)
     return checks
+
+
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be an integer") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be greater than or equal to 1")
+    return value
 
 
 def _request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
@@ -198,6 +255,35 @@ def cmd_alert_evidence(args: argparse.Namespace) -> Any:
         "GET",
         f"/dba/alerts/{args.alert_id}/evidence",
         params={"before_hours": args.before_hours, "after_hours": args.after_hours},
+    )
+
+
+def cmd_alerts_list(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/alerts",
+        params={
+            "status": None if args.all_statuses else args.status,
+            "severity": args.severity,
+            "tenant_id": args.tenant_id,
+            "instance_id": args.instance_id,
+            "page": args.page,
+            "page_size": args.page_size,
+            "start_time": args.start_time,
+            "end_time": args.end_time,
+        },
+    )
+
+
+def cmd_classification(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/instances/classification",
+        params={
+            "type": args.type,
+            "topology": args.topology,
+            "tenant_id": args.tenant_id,
+        },
     )
 
 
@@ -326,6 +412,27 @@ def build_parser() -> argparse.ArgumentParser:
     alert_evidence.add_argument("--before-hours", type=int)
     alert_evidence.add_argument("--after-hours", type=int)
     alert_evidence.set_defaults(func=cmd_alert_evidence)
+
+    alerts = sub.add_parser("alerts-list")
+    alerts.add_argument("--status", default="active")
+    alerts.add_argument("--all-statuses", action="store_true")
+    alerts.add_argument("--severity")
+    alerts.add_argument("--tenant-id")
+    alerts.add_argument("--instance-id", type=int)
+    alerts.add_argument("--page", type=_positive_int, default=1)
+    alerts.add_argument("--page-size", type=_positive_int, default=20)
+    alerts.add_argument("--start-time")
+    alerts.add_argument("--end-time")
+    alerts.set_defaults(func=cmd_alerts_list)
+
+    classification = sub.add_parser("classification")
+    classification.add_argument("--type", choices=["mysql", "postgres", "oracle", "tidb", "clickhouse"])
+    classification.add_argument(
+        "--topology",
+        help="Filter by topology kind: rac, dataguard, mysql_replication, mysql_group_replication, postgres_replication, tidb_cluster, clickhouse_cluster, replication, standalone",
+    )
+    classification.add_argument("--tenant-id")
+    classification.set_defaults(func=cmd_classification)
 
     inventory = sub.add_parser("inventory-summary")
     _common_filters(inventory)

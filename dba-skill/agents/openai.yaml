@@ -1,4 +1,4 @@
 interface:
   display_name: "DBA Skill"
-  short_description: "Query DBA inventory, ownership, alerts, and diagnostics"
-  default_prompt: "Use $dba-skill to answer DBA inventory, ownership, unused database, alert evidence, freshness, and allowlisted diagnostic questions from Database AI Center v2.0.21+."
+  short_description: "Query live contacts, active alerts, DBA inventory, ownership, and diagnostics"
+  default_prompt: "Use $dba-skill to answer live Database AI Center questions about database contacts, current active alerts, DBA inventory, ownership, unused databases, alert evidence, freshness, and allowlisted diagnostics."

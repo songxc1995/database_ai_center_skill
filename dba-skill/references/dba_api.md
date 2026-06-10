@@ -10,7 +10,9 @@ X-API-Key: <PROJECT_API_KEY>
 
 ## Recommended Flow
 
+- Current alert list: `GET /alerts`
 - Autocomplete: `GET /dba/directory/options`
+- Instance topology classification: `GET /instances/classification`
 - Search databases: `GET /dba/databases/search`
 - Scope summary: `GET /dba/ownership/scope`
 - Estate statistics: `GET /dba/inventory/summary`
@@ -22,6 +24,21 @@ X-API-Key: <PROJECT_API_KEY>
 - Diagnostics: `GET /dba/instances/{instance_id}/diagnostics/catalog` then `POST /dba/instances/{instance_id}/diagnostics/run`
 
 ## Query Endpoints
+
+### `GET /alerts`
+
+Parameters:
+
+- `status=active`
+- `severity`
+- `tenant_id`
+- `instance_id`
+- `page=1`
+- `page_size=20`
+- `start_time`
+- `end_time`
+
+Use this read-only endpoint for broad “现在有哪些告警 / 当前告警 / active alerts” questions. Prefer `status=active` unless the user explicitly asks for all statuses.
 
 ### `GET /dba/directory/options`
 
@@ -93,6 +110,20 @@ Parameters:
 - `stale_after_hours=72`
 
 Returns `counts`, `groups`, `definitions`, and `filters`.
+
+### `GET /instances/classification`
+
+Requires Database AI Center `v2.0.76+`.
+
+Parameters:
+
+- `type` (engine filter: `mysql` / `postgres` / `oracle` / `tidb` / `clickhouse`)
+- `topology` (filter by topology kind, see below)
+- `tenant_id`
+
+Returns `{ generated_at, summary, items }`. Each item has `id`, `name`, `host`, `type` (engine), `role` (`primary` / `physical_standby` / `node` / ...), `topology`, `cluster_id`, `cluster_name`, `cloud_vendor`, `is_cloud_rds`, and `has_backup`. `topology` is one of `rac`, `dataguard`, `mysql_replication`, `mysql_group_replication`, `postgres_replication`, `tidb_cluster`, `clickhouse_cluster`, `replication`, `standalone`. `summary` aggregates `by_engine`, `by_topology`, `by_role`, `cloud_rds`, and `with_backup` counts.
+
+Use for "哪些实例是 RAC / Data Guard / 单实例 / 主从", "哪些是云 RDS", and "哪些实例有备份" inventory questions. Note: a Data Guard primary or RAC not grouped into a cluster can appear as `standalone` (standbys are always identifiable); cloud RDS (`is_cloud_rds=true`) backups are not tracked by Database AI Center.
 
 ### `GET /dba/databases/unused`
 

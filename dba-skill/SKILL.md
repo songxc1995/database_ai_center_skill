@@ -1,6 +1,6 @@
 ---
 name: dba-skill
-description: Query Database AI Center v2.0.21+ DBA APIs for database estate statistics, unused databases, ownership/contact/business lookups, alert evidence, freshness, and allowlisted diagnostics. Use when Codex needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
+description: Query Database AI Center v2.0.21+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, and allowlisted diagnostics. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
 ---
 
 # DBA Skill
@@ -9,6 +9,8 @@ description: Query Database AI Center v2.0.21+ DBA APIs for database estate stat
 Use this skill as the primary read-only DBA data and analysis workflow for Database AI Center `v2.0.21+`.
 
 Prefer the `/api/v2/dba/*` endpoints. Do not use the legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}` chain as the main path.
+
+Use the read-only `alerts-list` helper for broad current alert inventory questions until a dedicated `/dba/alerts` list endpoint exists.
 
 Use `zabbix-readonly` only as supporting host evidence when Database AI Center data is insufficient for CPU, memory, disk, filesystem, load, or I/O questions.
 
@@ -29,11 +31,16 @@ Auth header:
 X-API-Key: <PROJECT_API_KEY>
 ```
 
+The helper auto-loads allowlisted `PROJECT_*` values from the nearest `.env` in the current working directory or its parents. That nearest `.env` overrides inherited process environment variables so stale shell sessions cannot silently point at another deployment. Do not write API keys inline in shell commands or chat logs.
+
 ## Helper Script
 Prefer the bundled helper when local script execution is available:
 
 ```bash
 python3 scripts/dba_api_client.py inventory-summary
+python3 scripts/dba_api_client.py classification --type oracle
+python3 scripts/dba_api_client.py directory-options --type contact --limit 20
+python3 scripts/dba_api_client.py alerts-list --status active --page-size 20
 python3 scripts/dba_api_client.py databases-search --business Payments --contact Alice
 python3 scripts/dba_api_client.py context --alert-id 5
 python3 scripts/dba_api_client.py diagnostics-catalog --instance-id 12
@@ -50,21 +57,31 @@ For asset, ownership, and governance questions:
 3. Use `ownership-scope` for summary questions about one contact, business, or department.
 4. Use `inventory-summary` for total database, inactive, unused, unowned, unassigned application, and stale discovery counts.
 5. Use `databases-unused` for “哪些库不再使用”.
+6. Use `classification` for “哪些实例是 RAC / Data Guard / 单实例 / 主从”, “哪些是云 RDS”, and “哪些实例有备份” (topology + cloud + backup inventory).
+
+For live list questions:
+
+1. Use `directory-options --type contact` for “数据库联系人有哪些”, “联系人列表”, or “有哪些联系人”.
+2. Use `alerts-list --status active` for “现在有哪些告警”, “当前告警”, “active alerts”, or “告警列表”.
+3. Do not answer live list questions from documentation, sample data, repository search, or direct local metadata database queries.
 
 For alert and diagnosis questions:
 
-1. Use `resolve` when the user gives host, IP, database name, application, contact, or alert id.
-2. Use `alert-evidence` for alert-specific evidence.
-3. Use `context` before producing DBA analysis.
-4. Use `freshness` before making confidence claims.
-5. Use `diagnostics-catalog` before any diagnostic run.
-6. Use `diagnostics-run` only with catalog `check_id` values.
+1. Use `alerts-list` first when the user asks which alerts currently exist.
+2. Use `resolve` when the user gives host, IP, database name, application, contact, or alert id.
+3. Use `alert-evidence` for alert-specific evidence.
+4. Use `context` before producing DBA analysis.
+5. Use `freshness` before making confidence claims.
+6. Use `diagnostics-catalog` before any diagnostic run.
+7. Use `diagnostics-run` only with catalog `check_id` values.
 
 ## Endpoint Map
 See `references/dba_api.md` for parameters, field semantics, examples, and error handling.
 
 Core endpoints:
 
+- `GET /alerts` (read-only current alert list used by `alerts-list`)
+- `GET /instances/classification` (instance topology / cloud-RDS / backup inventory, used by `classification`)
 - `GET /dba/resolve`
 - `GET /dba/context`
 - `GET /dba/alerts/{alert_id}/evidence`
@@ -82,6 +99,9 @@ Core endpoints:
 - Use only returned API data and returned Zabbix data.
 - Do not invent SQL, logs, topology events, metrics, owners, or contacts.
 - Do not request or emit database passwords, API keys, encrypted secrets, usernames, or full connection strings.
+- Do not query the local metadata database or scrape repository docs as a substitute for live Database AI Center API data.
+- Do not read or print `.env` directly. Use the helper so secrets stay out of chat logs.
+- Do not place API keys in shell commands. Rely on the helper's nearest `.env` loading, environment variables, or an external secret manager wrapper.
 - Do not run free-form SQL. Diagnostics must come from `diagnostics-catalog`.
 - Do not mutate Database AI Center data; this skill is read-oriented except for allowlisted diagnostic execution.
 - Keep final analysis in Chinese unless the user asks otherwise.

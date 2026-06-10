@@ -2,6 +2,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -59,6 +60,7 @@ class DbaApiClientTest(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingHandler)
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
+        self.workdir = tempfile.TemporaryDirectory()
         self.env = {
             **os.environ,
             "PROJECT_API_BASE_URL": f"http://127.0.0.1:{self.server.server_port}/api/v2",
@@ -69,15 +71,44 @@ class DbaApiClientTest(unittest.TestCase):
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=2)
+        self.workdir.cleanup()
 
-    def run_client(self, *args):
+    def run_client(self, *args, env=None, cwd=None):
         return subprocess.run(
             [sys.executable, str(CLIENT), *args],
-            env=self.env,
+            env=self.env if env is None else env,
+            cwd=self.workdir.name if cwd is None else cwd,
             text=True,
             capture_output=True,
             check=False,
         )
+
+    def test_alerts_list_defaults_to_active_status(self):
+        result = self.run_client("alerts-list")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/alerts")
+        self.assertEqual(request["query"]["status"], ["active"])
+        self.assertEqual(request["query"]["page"], ["1"])
+        self.assertEqual(request["query"]["page_size"], ["20"])
+
+    def test_alerts_list_can_omit_status_filter(self):
+        result = self.run_client("alerts-list", "--all-statuses", "--severity", "critical", "--page-size", "5")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        query = RecordingHandler.requests[0]["query"]
+        self.assertNotIn("status", query)
+        self.assertEqual(query["severity"], ["critical"])
+        self.assertEqual(query["page_size"], ["5"])
+
+    def test_alerts_list_rejects_non_positive_page_before_http_request(self):
+        result = self.run_client("alerts-list", "--page", "0")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(RecordingHandler.requests, [])
+        self.assertIn("must be greater than or equal to 1", result.stderr)
 
     def test_directory_options_sends_api_key_and_query_parameters(self):
         result = self.run_client(
@@ -102,6 +133,67 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(request["query"]["search"], ["Pay"])
         self.assertEqual(request["query"]["include_inactive"], ["true"])
         self.assertEqual(request["query"]["limit"], ["5"])
+
+    def test_classification_sends_engine_and_topology_filters(self):
+        result = self.run_client("classification", "--type", "oracle", "--topology", "dataguard")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/instances/classification")
+        self.assertEqual(request["query"]["type"], ["oracle"])
+        self.assertEqual(request["query"]["topology"], ["dataguard"])
+
+    def test_classification_rejects_unknown_engine_before_http_request(self):
+        result = self.run_client("classification", "--type", "mariadb")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(RecordingHandler.requests, [])
+
+    def test_env_file_fallback_loads_project_config_without_printing_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, ".env").write_text(
+                f"PROJECT_API_BASE_URL=http://127.0.0.1:{self.server.server_port}/api/v2\n"
+                "PROJECT_API_KEY=dotenv-secret-key\n"
+                "IGNORED_SECRET=should-not-load\n",
+                encoding="utf-8",
+            )
+            env = dict(os.environ)
+            for key in (
+                "PROJECT_API_BASE_URL",
+                "PROJECT_API_KEY",
+                "PROJECT_TIMEOUT_SECONDS",
+                "PROJECT_STALE_AFTER_HOURS",
+            ):
+                env.pop(key, None)
+
+            result = self.run_client("inventory-summary", env=env, cwd=temp_dir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        headers = {key.lower(): value for key, value in RecordingHandler.requests[0]["headers"].items()}
+        self.assertEqual(headers["x-api-key"], "dotenv-secret-key")
+        self.assertNotIn("dotenv-secret-key", result.stdout)
+        self.assertNotIn("dotenv-secret-key", result.stderr)
+
+    def test_nearest_env_file_overrides_stale_process_environment(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            Path(temp_dir, ".env").write_text(
+                f"PROJECT_API_BASE_URL=http://127.0.0.1:{self.server.server_port}/api/v2\n"
+                "PROJECT_API_KEY=fresh-dotenv-key\n",
+                encoding="utf-8",
+            )
+            env = {
+                **os.environ,
+                "PROJECT_API_BASE_URL": "http://127.0.0.1:1/api/v2",
+                "PROJECT_API_KEY": "stale-process-key",
+            }
+
+            result = self.run_client("inventory-summary", env=env, cwd=temp_dir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        headers = {key.lower(): value for key, value in RecordingHandler.requests[0]["headers"].items()}
+        self.assertEqual(headers["x-api-key"], "fresh-dotenv-key")
+        self.assertNotIn("stale-process-key", result.stderr)
 
     def test_database_search_preserves_ownership_filters(self):
         result = self.run_client(

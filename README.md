@@ -6,8 +6,8 @@ This repository contains skills for external model platforms that can make outbo
 
 - `dba-skill/`
   - Replaces the former `database-ai-center/` alert-only skill.
-  - Uses Database AI Center `v2.0.21+` `/api/v2/dba/*` APIs.
-  - Answers database estate statistics, unused database, inactive discovery, ownership, contact, department, business/application, alert evidence, freshness, timeline, and allowlisted diagnostic questions.
+  - Uses Database AI Center `v2.0.21+` `/api/v2/dba/*` APIs (plus the read-only `GET /alerts` and `GET /instances/classification` — the latter needs `v2.0.76+`).
+  - Answers database estate statistics, unused database, inactive discovery, ownership, contact, department, business/application, current alerts, instance topology classification (RAC / Data Guard / replication / standalone / cloud RDS / has-backup), alert evidence, freshness, timeline, and allowlisted diagnostic questions.
   - Includes `scripts/dba_api_client.py` to make common DBA API calls safely.
   - Optionally enriches analysis with `zabbix-readonly` for host-side evidence.
 
