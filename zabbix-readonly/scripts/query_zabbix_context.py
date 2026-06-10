@@ -7,9 +7,21 @@ import os
 import ssl
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+
+
+ENV_FILE_NAMES = (".env",)
+ENV_ALLOWLIST = {
+    "ZABBIX_BASE_URL",
+    "ZABBIX_API_TOKEN",
+    "ZABBIX_TIMEOUT_SECONDS",
+    "ZABBIX_VERIFY_TLS",
+    "ZABBIX_HOST_GROUP",
+}
+_ENV_FILES_LOADED = False
 
 
 @dataclass(frozen=True)
@@ -24,7 +36,45 @@ class RuntimeConfig:
     verify_tls: bool
 
 
+def _unquote_env_value(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        return value[1:-1]
+    return value
+
+
+def _load_env_files() -> None:
+    global _ENV_FILES_LOADED
+    if _ENV_FILES_LOADED:
+        return
+    _ENV_FILES_LOADED = True
+
+    try:
+        cwd = Path.cwd().resolve()
+    except OSError:
+        return
+
+    for directory in (cwd, *cwd.parents):
+        for filename in ENV_FILE_NAMES:
+            path = directory / filename
+            if not path.is_file():
+                continue
+            for raw_line in path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("export "):
+                    line = line[len("export ") :].strip()
+                key, separator, value = line.partition("=")
+                key = key.strip()
+                if separator != "=" or key not in ENV_ALLOWLIST:
+                    continue
+                os.environ[key] = _unquote_env_value(value)
+            return
+
+
 def _env_or_default(key: str, default: str | None = None) -> str | None:
+    _load_env_files()
     value = os.getenv(key)
     if value is None:
         return default

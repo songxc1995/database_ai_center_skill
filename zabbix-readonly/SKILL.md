@@ -32,6 +32,8 @@ ZABBIX_TIMEOUT_SECONDS=8
 ZABBIX_VERIFY_TLS=true
 ```
 
+The helper auto-loads allowlisted `ZABBIX_*` values from the nearest `.env` in the current working directory or its parents. That nearest `.env` overrides inherited process environment variables so stale shell sessions cannot silently point at another deployment. Do not read or print `.env` directly, and do not write Zabbix tokens inline in shell commands or chat logs.
+
 ## Input
 Primary target identifier:
 
