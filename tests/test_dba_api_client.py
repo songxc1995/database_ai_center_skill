@@ -280,6 +280,49 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertIn("<redacted>", error["response"])
         self.assertNotIn("super-secret-key", result.stderr)
 
+    def test_probe_catalog_gets_instance_probe_catalog(self):
+        result = self.run_client("probe-catalog", "--instance-id", "12")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/instances/12/diagnostics/catalog")
+
+    def test_probe_run_posts_probe_name_and_bound_params(self):
+        result = self.run_client(
+            "probe-run",
+            "--instance-id",
+            "12",
+            "--probe",
+            "sql_plan",
+            "--sql-id",
+            "gm9ttamf39c40",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["path"], "/api/v2/instances/12/diagnostics/probe")
+        body = json.loads(request["body"])
+        self.assertEqual(body["probe"], "sql_plan")
+        self.assertEqual(body["params"], {"sql_id": "gm9ttamf39c40"})
+
+    def test_probe_run_rejects_free_form_sql_before_http_request(self):
+        result = self.run_client(
+            "probe-run",
+            "--instance-id",
+            "12",
+            "--probe",
+            "sql_plan",
+            "--sql",
+            "select * from users",
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(RecordingHandler.requests, [])
+        error = json.loads(result.stderr)
+        self.assertEqual(error["error"], "free_form_sql_not_supported")
+
 
 if __name__ == "__main__":
     unittest.main()

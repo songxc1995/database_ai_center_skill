@@ -385,6 +385,30 @@ def cmd_diagnostics_run(args: argparse.Namespace) -> Any:
     return _request("POST", f"/dba/instances/{args.instance_id}/diagnostics/run", body=body)
 
 
+def cmd_probe_catalog(args: argparse.Namespace) -> Any:
+    return _request("GET", f"/instances/{args.instance_id}/diagnostics/catalog")
+
+
+def cmd_probe_run(args: argparse.Namespace) -> Any:
+    if args.sql:
+        _fail(
+            "free_form_sql_not_supported",
+            "probe-run only accepts a whitelisted probe name + bound params; free-form SQL is not supported",
+            exit_code=2,
+        )
+    params: dict[str, Any] = {}
+    if args.sql_id:
+        params["sql_id"] = args.sql_id
+    if args.session_id is not None:
+        params["session_id"] = args.session_id
+    if args.object_name:
+        params["object_name"] = args.object_name
+    body: dict[str, Any] = {"probe": args.probe}
+    if params:
+        body["params"] = params
+    return _request("POST", f"/instances/{args.instance_id}/diagnostics/probe", body=body)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -497,6 +521,19 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--database-name")
     run.add_argument("--sql", help=argparse.SUPPRESS)
     run.set_defaults(func=cmd_diagnostics_run)
+
+    probe_catalog = sub.add_parser("probe-catalog")
+    probe_catalog.add_argument("--instance-id", type=int, required=True)
+    probe_catalog.set_defaults(func=cmd_probe_catalog)
+
+    probe_run = sub.add_parser("probe-run")
+    probe_run.add_argument("--instance-id", type=int, required=True)
+    probe_run.add_argument("--probe", required=True)
+    probe_run.add_argument("--sql-id")
+    probe_run.add_argument("--session-id", type=int)
+    probe_run.add_argument("--object-name")
+    probe_run.add_argument("--sql", help=argparse.SUPPRESS)
+    probe_run.set_defaults(func=cmd_probe_run)
 
     return parser
 

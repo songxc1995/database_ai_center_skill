@@ -45,6 +45,10 @@ python3 scripts/dba_api_client.py databases-search --business Payments --contact
 python3 scripts/dba_api_client.py context --alert-id 5
 python3 scripts/dba_api_client.py diagnostics-catalog --instance-id 12
 python3 scripts/dba_api_client.py diagnostics-run --instance-id 12 --checks database_sizes,storage
+python3 scripts/dba_api_client.py probe-catalog --instance-id 12
+python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
+python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
+python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
 ```
 
 The helper prints JSON to stdout. It prints structured JSON errors to stderr and never prints the API key.
@@ -75,6 +79,13 @@ For alert and diagnosis questions:
 6. Use `diagnostics-catalog` before any diagnostic run.
 7. Use `diagnostics-run` only with catalog `check_id` values.
 
+For live evidence drill-down (Database AI Center `v2.19.0+`, server `AI_DIAGNOSTIC_PROBES_ENABLED=true`):
+
+1. Use `probe-catalog --instance-id N` to discover the probes the engine supports and which param each needs.
+2. Run no-parameter snapshot probes first (`probe-run --probe slow_queries|active_sessions|blocking_chain|wait_events|locks|long_transactions|session_waits|resource_pressure`).
+3. Drill down multi-round: take a `sql_id` from `slow_queries`/`active_sessions` → `probe-run --probe sql_plan --sql-id <id>` (check full scans / bad plans) → `probe-run --probe index_coverage --object-name <table>` and `probe-run --probe table_stats --object-name <table>` (are filter columns indexed? are optimizer stats stale?). Use `bind_values --sql-id <id>` for parameter-skew, `session_detail --session-id <id>` for one session.
+4. Pass params only via `--sql-id` / `--session-id` / `--object-name`; never construct SQL. The server validates and binds them.
+
 ## Endpoint Map
 See `references/dba_api.md` for parameters, field semantics, examples, and error handling.
 
@@ -94,6 +105,8 @@ Core endpoints:
 - `GET /dba/instances/{instance_id}/freshness`
 - `GET /dba/instances/{instance_id}/diagnostics/catalog`
 - `POST /dba/instances/{instance_id}/diagnostics/run`
+- `GET /instances/{instance_id}/diagnostics/catalog` (live probe catalog, `v2.19.0+`, used by `probe-catalog`)
+- `POST /instances/{instance_id}/diagnostics/probe` (one live whitelisted probe incl. parameterized drill-down, `v2.19.0+`, used by `probe-run`)
 
 ## Safety Rules
 - Use only returned API data and returned Zabbix data.
@@ -102,7 +115,7 @@ Core endpoints:
 - Do not query the local metadata database or scrape repository docs as a substitute for live Database AI Center API data.
 - Do not read or print `.env` directly. Use the helper so secrets stay out of chat logs.
 - Do not place API keys in shell commands. Rely on the helper's nearest `.env` loading, environment variables, or an external secret manager wrapper.
-- Do not run free-form SQL. Diagnostics must come from `diagnostics-catalog`.
+- Do not run free-form SQL. Diagnostics come from `diagnostics-catalog` (DBA checks) or whitelisted probe names via `probe-catalog` / `probe-run` (`--sql-id` / `--session-id` / `--object-name` params only — never a SQL string).
 - Do not mutate Database AI Center data; this skill is read-oriented except for allowlisted diagnostic execution.
 - Keep final analysis in Chinese unless the user asks otherwise.
 - Treat Zabbix as supporting evidence only, not a replacement for Database AI Center evidence.

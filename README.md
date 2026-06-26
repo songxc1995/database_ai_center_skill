@@ -8,6 +8,7 @@ This repository contains skills for external model platforms that can make outbo
   - Replaces the former `database-ai-center/` alert-only skill.
   - Uses Database AI Center `v2.0.21+` `/api/v2/dba/*` APIs (plus the read-only `GET /alerts` and `GET /instances/classification` — the latter needs `v2.0.76+`).
   - Answers database estate statistics, unused database, inactive discovery, ownership, contact, department, business/application, current alerts, instance topology classification (RAC / Data Guard / replication / standalone / cloud RDS / has-backup), alert evidence, freshness, timeline, and allowlisted diagnostic questions.
+  - **Live evidence drill-down (`v2.19.0+`):** runs the read-only, whitelisted diagnostic probes the agentic AI pipeline uses — `probe-catalog` / `probe-run` over `GET|POST /instances/{id}/diagnostics/{catalog,probe}` — for true multi-round root-cause analysis (slow_queries → sql_plan → index_coverage + table_stats → bind_values). Caller passes a probe **name** + bound params (`--sql-id` / `--session-id` / `--object-name`), never SQL; the fixed SQL stays server-side and output is redacted. Requires `AI_DIAGNOSTIC_PROBES_ENABLED=true` and role `ai-client` (or higher).
   - Includes `scripts/dba_api_client.py` to make common DBA API calls safely.
   - Optionally enriches analysis with `zabbix-readonly` for host-side evidence.
 
@@ -52,8 +53,8 @@ ZABBIX_VERIFY_TLS=true
 
 ## Compatibility Notes
 
-- This repository targets Database AI Center `v2.0.21+`.
+- This repository targets Database AI Center `v2.0.21+`; the live diagnostic probe drill-down (`probe-catalog` / `probe-run`) requires `v2.19.0+`.
 - The former `database-ai-center` skill name is retired in favor of `dba-skill`.
 - The main path no longer depends on legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}`.
-- Diagnostics never accepts free-form SQL; use catalog `check_id` values only.
+- Diagnostics never accepts free-form SQL: use DBA catalog `check_id` values (`diagnostics-run`) or whitelisted probe names + bound params (`probe-run`) only.
 - Skill outputs and errors must not expose API keys, database credentials, tokens, encrypted secrets, usernames, or connection strings.

@@ -21,7 +21,8 @@ X-API-Key: <PROJECT_API_KEY>
 - Evidence bundle: `GET /dba/context`
 - Alert evidence: `GET /dba/alerts/{alert_id}/evidence`
 - Freshness: `GET /dba/instances/{instance_id}/freshness`
-- Diagnostics: `GET /dba/instances/{instance_id}/diagnostics/catalog` then `POST /dba/instances/{instance_id}/diagnostics/run`
+- Diagnostics (DBA check catalog): `GET /dba/instances/{instance_id}/diagnostics/catalog` then `POST /dba/instances/{instance_id}/diagnostics/run`
+- Live probes (multi-round drill-down, `v2.19.0+`): `GET /instances/{instance_id}/diagnostics/catalog` then `POST /instances/{instance_id}/diagnostics/probe`
 
 ## Query Endpoints
 
@@ -226,6 +227,42 @@ Body:
 ```
 
 Unknown checks return `400`. Arbitrary SQL fields return `422`. Live checks may return `skipped` until safe live collectors are enabled.
+
+## Live diagnostic probes (multi-round drill-down)
+
+Requires Database AI Center `v2.19.0+` and `AI_DIAGNOSTIC_PROBES_ENABLED=true` on the server. Roles: `admin` / `operator` / `ai-client`. These are the read-only, whitelisted probes the agentic AI pipeline uses — the client passes a probe **name** + bound params, never SQL; the fixed SQL stays server-side and output is redacted.
+
+### `GET /instances/{instance_id}/diagnostics/catalog`
+
+Lists the probes available for the instance's engine. Read this before drilling down.
+
+```json
+{
+  "instance_id": 12,
+  "db_type": "oracle",
+  "probes": [
+    {"probe": "active_sessions", "param": null, "requires_param": false, "supported": true},
+    {"probe": "sql_plan", "param": "sql_id", "requires_param": true, "supported": true},
+    {"probe": "table_stats", "param": "object_name", "requires_param": true, "supported": true}
+  ]
+}
+```
+
+### `POST /instances/{instance_id}/diagnostics/probe`
+
+Runs ONE whitelisted probe, including the parameterized drill-down probes. Body:
+
+```json
+{ "probe": "sql_plan", "params": { "sql_id": "gm9ttamf39c40" } }
+```
+
+- `params` carries exactly one bound value: `sql_id` (sql_text / sql_plan / bind_values), `session_id` (session_detail), or `object_name` (index_coverage / table_stats). No-param snapshot probes omit `params`.
+- Response: `{instance_id, db_type, probe, available, note, rows}`. `rows` are redacted; bind values are masked unless the server opts in.
+- `409` when probes are disabled; unknown probe / unsupported db_type → `400`; a missing/invalid param degrades to `{available: false, note}` with HTTP `200`.
+
+Typical multi-round drill-down: `slow_queries` → take a `sql_id` → `sql_plan` (check for full scans) → `index_coverage` + `table_stats` on the scanned table (are filter columns indexed? are stats stale?) → optionally `bind_values` for parameter-skew.
+
+Probe names: `active_sessions`, `blocking_chain`, `slow_queries`, `wait_events`, `session_detail`, `sql_text`, `sql_plan`, `bind_values`, `index_coverage`, `table_stats`, `locks`, `long_transactions`, `session_waits`, `resource_pressure`. (`sql_text`/`sql_plan`/`bind_values` are Oracle; `index_coverage`/`table_stats` cover Postgres/MySQL/Oracle — use the catalog's `supported` flag.)
 
 ## Statistics Semantics
 
