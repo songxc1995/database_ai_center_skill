@@ -323,6 +323,59 @@ class DbaApiClientTest(unittest.TestCase):
         error = json.loads(result.stderr)
         self.assertEqual(error["error"], "free_form_sql_not_supported")
 
+    def test_kb_search_sends_semantic_and_filter_params(self):
+        result = self.run_client(
+            "kb-search",
+            "--q",
+            "connections spike",
+            "--db-type",
+            "oracle",
+            "--sort",
+            "recency",
+            "--limit",
+            "10",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/knowledge/entries")
+        self.assertEqual(request["query"]["q"], ["connections spike"])
+        self.assertEqual(request["query"]["db_type"], ["oracle"])
+        self.assertEqual(request["query"]["sort"], ["recency"])
+        self.assertEqual(request["query"]["limit"], ["10"])
+
+    def test_kb_incidents_url_encodes_root_cause_key(self):
+        result = self.run_client(
+            "kb-incidents",
+            "--root-cause-key",
+            "pool exhausted/oracle",
+            "--limit",
+            "5",
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        # space + slash in the key are percent-encoded so it stays one path segment
+        self.assertEqual(
+            request["path"],
+            "/api/v2/knowledge/entries/pool%20exhausted%2Foracle/incidents",
+        )
+        self.assertEqual(request["query"]["limit"], ["5"])
+
+    def test_kb_doc_search_requires_query(self):
+        missing = self.run_client("kb-doc-search")
+        self.assertNotEqual(missing.returncode, 0)
+        self.assertEqual(RecordingHandler.requests, [])
+
+        ok = self.run_client("kb-doc-search", "--q", "failover runbook", "--limit", "3")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/knowledge/documents/search")
+        self.assertEqual(request["query"]["q"], ["failover runbook"])
+        self.assertEqual(request["query"]["limit"], ["3"])
+
 
 if __name__ == "__main__":
     unittest.main()
