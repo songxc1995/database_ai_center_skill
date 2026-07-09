@@ -264,6 +264,30 @@ Typical multi-round drill-down: `slow_queries` → take a `sql_id` → `sql_plan
 
 Probe names: `active_sessions`, `blocking_chain`, `slow_queries`, `wait_events`, `session_detail`, `sql_text`, `sql_plan`, `bind_values`, `index_coverage`, `table_stats`, `locks`, `long_transactions`, `session_waits`, `resource_pressure`. (`sql_text`/`sql_plan`/`bind_values` are Oracle; `index_coverage`/`table_stats` cover Postgres/MySQL/Oracle — use the catalog's `supported` flag.)
 
+## Knowledge Base (prior incidents + ops runbooks, `v2.32+`)
+
+Read-only (`viewer`+). Grounds a diagnosis in DBA-confirmed history and curated runbooks. Every endpoint degrades to a well-formed empty body when the RAG corpus / pgvector is absent (`available:false`); semantic search falls back to keyword/filters (`semantic_used:false` + a `warning`) rather than erroring.
+
+### `GET /knowledge/entries` (helper: `kb-search`)
+
+Confirmed root causes aggregated into entries. Query params:
+- `q` — semantic query (embeds the text, widened recall).
+- `keyword` — literal substring match (e.g. `ORA-00060`).
+- `db_type` — `oracle` | `mysql` | `postgres` | `tidb` | `clickhouse`.
+- `rule_id`, `sort` (`frequency` | `recency`), `limit`, `offset`.
+
+Response: `{available, semantic_used, warning, total, entries:[{root_cause_key, root_cause, hit_count, db_types, rule_ids, first_seen_at, last_seen_at, representative_symptom, relevance}]}`. `hit_count` = how many times DBAs confirmed that root cause (a strength prior); `relevance` is `1 - cosine_distance` on semantic queries.
+
+### `GET /knowledge/entries/{root_cause_key}/incidents` (helper: `kb-incidents`)
+
+The raw incidents behind one entry. Query params: `db_type`, `rule_id`, `limit`. Response `{available, incidents:[{result_id, alert_event_id, db_type, rule_id, instance_id, instance_name, symptom_text, root_cause_text, remediation_text, created_at}]}`. Each `alert_event_id` maps to a real past diagnosis.
+
+### `GET /knowledge/documents/search` (helper: `kb-doc-search`)
+
+Semantic search over curated ops-runbook documents (`.md/.txt/.pdf/.docx` imported by DBAs). Query params: `q` (required), `limit`. Response `{available, semantic_used, warning, results:[{document_id, title, chunk_text, relevance}]}`.
+
+Usage: treat hits as prior evidence/references, not ground truth — weigh against current live evidence and note when a conclusion matches a confirmed past root cause.
+
 ## Statistics Semantics
 
 - `total_databases`: database rows matching filters.

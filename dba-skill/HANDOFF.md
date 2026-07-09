@@ -53,6 +53,8 @@ python3 scripts/dba_api_client.py ownership-scope --business Payments
 python3 scripts/dba_api_client.py context --alert-id 5
 python3 scripts/dba_api_client.py diagnostics-catalog --instance-id 12
 python3 scripts/dba_api_client.py diagnostics-run --instance-id 12 --checks database_sizes,storage
+python3 scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
+python3 scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
 ```
 
 The helper emits JSON and redacts `PROJECT_API_KEY` from errors.
