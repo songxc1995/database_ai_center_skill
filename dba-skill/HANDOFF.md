@@ -55,6 +55,8 @@ python3 scripts/dba_api_client.py diagnostics-catalog --instance-id 12
 python3 scripts/dba_api_client.py diagnostics-run --instance-id 12 --checks database_sizes,storage
 python3 scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
 python3 scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
+python3 scripts/dba_api_client.py ai-endpoints
+python3 scripts/dba_api_client.py get /dashboard/trends --param hours=6
 ```
 
 The helper emits JSON and redacts `PROJECT_API_KEY` from errors.
@@ -73,6 +75,7 @@ The helper emits JSON and redacts `PROJECT_API_KEY` from errors.
 - `GET /dba/instances/{instance_id}/freshness`: return stale evidence labels and latest collection/discovery timestamps.
 - `GET /dba/instances/{instance_id}/diagnostics/catalog`: return allowlisted diagnostic checks.
 - `POST /dba/instances/{instance_id}/diagnostics/run`: run allowlisted diagnostics only.
+- `GET /ai-endpoints` (`v2.47.0+`): self-describing catalog of model-reachable read endpoints; drill into any listed path with the read-only `get` helper.
 
 ## Key Semantics
 

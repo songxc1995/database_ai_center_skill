@@ -288,6 +288,25 @@ Semantic search over curated ops-runbook documents (`.md/.txt/.pdf/.docx` import
 
 Usage: treat hits as prior evidence/references, not ground truth — weigh against current live evidence and note when a conclusion matches a confirmed past root cause.
 
+## Capabilities catalog (long-tail drill-in)
+
+### `GET /ai-endpoints`
+
+Self-describing catalog (`v2.47.0+`) of every model-reachable read endpoint an `ai-client` key
+may call. Derived at runtime from the live routes and their `require_roles` grants, so it can
+never drift from actual permissions. Response: a list of `{path, methods, summary, description}`
+(v2 paths only, deduped). Used by the `ai-endpoints` helper command; no parameters.
+
+Use it to discover read endpoints beyond the analysis core group, then drill in with `get`.
+
+### `GET <any catalog path>` (via the `get` helper)
+
+The `get <path> [--param key=value ...]` helper issues a plain **read-only GET** against any path
+returned by the catalog. Paths come back as full `/api/v2/...`; the helper strips the duplicate
+version prefix, so `get /dashboard/trends` and `get /api/v2/dashboard/trends` are equivalent.
+`--param` is repeatable and maps to query parameters. It never issues writes; use `probe-run`
+(rate-limited server-side) for live-DB probes and `diagnostics-run` for DBA checks.
+
 ## Statistics Semantics
 
 - `total_databases`: database rows matching filters.

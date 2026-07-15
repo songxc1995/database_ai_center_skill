@@ -1,6 +1,6 @@
 ---
 name: dba-skill
-description: Query Database AI Center v2.0.21+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics, and the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
+description: Query Database AI Center v2.0.21+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
 ---
 
 # DBA Skill
@@ -53,6 +53,8 @@ python3 scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db
 python3 scripts/dba_api_client.py kb-search --keyword ORA-00060 --sort recency
 python3 scripts/dba_api_client.py kb-incidents --root-cause-key "<root_cause_key from kb-search>"
 python3 scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
+python3 scripts/dba_api_client.py ai-endpoints
+python3 scripts/dba_api_client.py get /dashboard/trends --param hours=6 --param bucket_minutes=15
 ```
 
 The helper prints JSON to stdout. It prints structured JSON errors to stderr and never prints the API key.
@@ -97,6 +99,30 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 3. Use `kb-doc-search --q "<topic>"` to retrieve curated ops-runbook passages (handling steps, SOPs) relevant to the issue.
 4. Treat knowledge-base hits as **prior evidence and references**, not ground truth: weigh them against the current live evidence, and say when your conclusion matches a past confirmed root cause. These endpoints are read-only and return an empty result (`available:false`) when the knowledge corpus is not enabled — degrade quietly, never block the answer.
 
+### Analysis core group vs. the long tail
+The commands above (`resolve`, `context`, `alert-evidence`, `alerts-list`, `classification`,
+`inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
+`directory-options`, `freshness`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
+`probe-catalog`, `probe-run`) are the **analysis core group** — the high-value read endpoints
+you should reach for first. They cover most alert, ownership, inventory, and live-evidence
+questions without needing to discover anything.
+
+Database AI Center exposes many more read-only endpoints to `ai-client` keys beyond this core
+group. When the core commands do not cover what you need:
+
+1. Run `ai-endpoints` to fetch the **self-describing catalog** of every model-reachable read
+   endpoint (path, methods, summary, description). It is derived from the live routes and their
+   role grants, so it never drifts from actual permissions.
+2. Pick a relevant `GET` path from the catalog and read it with
+   `get <path> [--param key=value ...]`. Paths from the catalog come as full `/api/v2/...`; the
+   helper strips the duplicate version prefix, so both `get /dashboard/trends` and
+   `get /api/v2/dashboard/trends` work.
+3. `get` is **GET-only** (read). It never issues writes; for live-DB probes keep using
+   `probe-run` (rate-limited server-side), and for DBA checks keep using `diagnostics-run`.
+
+Prefer a dedicated core command when one exists — it carries typed filters and safer defaults.
+Use `ai-endpoints` + `get` for the long tail, not as a replacement for the core group.
+
 ## Endpoint Map
 See `references/dba_api.md` for parameters, field semantics, examples, and error handling.
 
@@ -121,6 +147,7 @@ Core endpoints:
 - `GET /knowledge/entries` (DBA-confirmed root-cause/remediation history, `v2.32+`, used by `kb-search`)
 - `GET /knowledge/entries/{root_cause_key}/incidents` (raw incidents behind a root cause, used by `kb-incidents`)
 - `GET /knowledge/documents/search` (semantic search over curated ops-runbook documents, `v2.39+`, used by `kb-doc-search`)
+- `GET /ai-endpoints` (self-describing catalog of model-reachable read endpoints, `v2.47.0+`, used by `ai-endpoints`; drill into any listed path with `get`)
 
 ## Safety Rules
 - Use only returned API data and returned Zabbix data.

@@ -376,6 +376,34 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(request["query"]["q"], ["failover runbook"])
         self.assertEqual(request["query"]["limit"], ["3"])
 
+    def test_ai_endpoints_lists_the_catalog(self):
+        result = self.run_client("ai-endpoints")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/ai-endpoints")
+
+    def test_get_fetches_arbitrary_read_path_with_params(self):
+        result = self.run_client(
+            "get", "/dashboard/trends", "--param", "hours=6", "--param", "bucket_minutes=15"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/dashboard/trends")
+        self.assertEqual(request["query"]["hours"], ["6"])
+        self.assertEqual(request["query"]["bucket_minutes"], ["15"])
+
+    def test_get_strips_catalog_full_path_prefix(self):
+        # the ai-endpoints catalog returns full paths like /api/v2/topology;
+        # `get` must not double the /api/v2 prefix.
+        result = self.run_client("get", "/api/v2/topology")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/topology")
+
 
 if __name__ == "__main__":
     unittest.main()

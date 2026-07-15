@@ -389,6 +389,40 @@ def cmd_probe_catalog(args: argparse.Namespace) -> Any:
     return _request("GET", f"/instances/{args.instance_id}/diagnostics/catalog")
 
 
+def cmd_ai_endpoints(args: argparse.Namespace) -> Any:
+    _ = args
+    return _request("GET", "/ai-endpoints")
+
+
+def _normalize_read_path(raw: str) -> str:
+    """Normalize a catalog path onto the base URL, which already ends in /api/v<n>.
+    The ai-endpoints catalog returns full paths like /api/v2/topology, so strip a
+    leading /api/vN to avoid doubling the version prefix; accept bare paths too."""
+    path = raw.strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    for prefix in ("/api/v2", "/api/v1"):
+        if path == prefix or path.startswith(prefix + "/"):
+            path = path[len(prefix):] or "/"
+            break
+    return path
+
+
+def _parse_kv_params(raw_params: list[str] | None) -> dict[str, str]:
+    params: dict[str, str] = {}
+    for item in raw_params or []:
+        key, sep, value = item.partition("=")
+        if sep != "=" or not key.strip():
+            _fail("invalid_argument", f"--param must be key=value, got: {item}", exit_code=2)
+        params[key.strip()] = value
+    return params
+
+
+def cmd_get(args: argparse.Namespace) -> Any:
+    path = _normalize_read_path(args.path)
+    return _request("GET", path, params=_parse_kv_params(args.param))
+
+
 def cmd_probe_run(args: argparse.Namespace) -> Any:
     if args.sql:
         _fail(
@@ -554,6 +588,25 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--database-name")
     run.add_argument("--sql", help=argparse.SUPPRESS)
     run.set_defaults(func=cmd_diagnostics_run)
+
+    ai_endpoints = sub.add_parser(
+        "ai-endpoints",
+        help="List the self-describing catalog of model-reachable (ai-client) read endpoints.",
+    )
+    ai_endpoints.set_defaults(func=cmd_ai_endpoints)
+
+    get_cmd = sub.add_parser(
+        "get",
+        help="GET any model-reachable read path from the ai-endpoints catalog (drill-in).",
+    )
+    get_cmd.add_argument("path", help="Read path, e.g. /dashboard/trends or /api/v2/topology")
+    get_cmd.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Query parameter (repeatable), e.g. --param hours=6",
+    )
+    get_cmd.set_defaults(func=cmd_get)
 
     probe_catalog = sub.add_parser("probe-catalog")
     probe_catalog.add_argument("--instance-id", type=int, required=True)
