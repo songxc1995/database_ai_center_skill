@@ -262,7 +262,18 @@ Runs ONE whitelisted probe, including the parameterized drill-down probes. Body:
 
 Typical multi-round drill-down: `slow_queries` → take a `sql_id` → `sql_plan` (check for full scans) → `index_coverage` + `table_stats` on the scanned table (are filter columns indexed? are stats stale?) → optionally `bind_values` for parameter-skew.
 
-Probe names: `active_sessions`, `blocking_chain`, `slow_queries`, `wait_events`, `session_detail`, `sql_text`, `sql_plan`, `bind_values`, `index_coverage`, `table_stats`, `locks`, `long_transactions`, `session_waits`, `resource_pressure`. (`sql_text`/`sql_plan`/`bind_values` are Oracle; `index_coverage`/`table_stats` cover Postgres/MySQL/Oracle — use the catalog's `supported` flag.)
+Probe names: `active_sessions`, `blocking_chain`, `slow_queries`, `wait_events`, `session_detail`, `sql_text`, `sql_plan`, `bind_values`, `index_coverage`, `table_stats`, `locks`, `long_transactions`, `session_waits`, `resource_pressure`, `full_join_statements` (MySQL: per-digest SQL behind `mysql_select_full_join_high`), `error_statements` (TiDB: recently failing statements), `db_error_log` (ELK-backed error log, on-demand). (`sql_text`/`sql_plan`/`bind_values` are Oracle; `index_coverage`/`table_stats` cover Postgres/MySQL/Oracle — always trust the catalog's `supported` flag over this list.)
+
+### `POST /instances/{instance_id}/prometheus/query`
+
+Read-only instant PromQL against a TiDB instance's Prometheus (`v2.63+`). Roles: `admin` / `operator`. Reaches cluster-level signals that SQL probes cannot: hotspots, per-store request/flow skew, leader/region balance, golden signals, and metric-name/value verification before authoring a rule. SSRF-guarded; single instant query only. Body:
+
+```json
+{ "query": "sum(rate(tikv_grpc_msg_duration_seconds_count[5m])) by (instance)", "url": "<optional override; defaults to saved extra.prometheus_url>" }
+```
+
+- Response: `{query, result_type, series: [{metric, timestamp, value}], series_count, truncated}`.
+- Read-only — never a write/remote-write query. `502` on upstream Prometheus error; `400` on missing query / unsafe URL.
 
 ## Knowledge Base (prior incidents + ops runbooks, `v2.32+`)
 

@@ -443,6 +443,13 @@ def cmd_probe_run(args: argparse.Namespace) -> Any:
     return _request("POST", f"/instances/{args.instance_id}/diagnostics/probe", body=body)
 
 
+def cmd_prometheus_query(args: argparse.Namespace) -> Any:
+    body: dict[str, Any] = {"query": args.query}
+    if args.url:
+        body["url"] = args.url
+    return _request("POST", f"/instances/{args.instance_id}/prometheus/query", body=body)
+
+
 def cmd_kb_search(args: argparse.Namespace) -> Any:
     return _request(
         "GET",
@@ -620,6 +627,16 @@ def build_parser() -> argparse.ArgumentParser:
     probe_run.add_argument("--object-name")
     probe_run.add_argument("--sql", help=argparse.SUPPRESS)
     probe_run.set_defaults(func=cmd_probe_run)
+
+    prometheus_query = sub.add_parser(
+        "prometheus-query",
+        help="Read-only instant PromQL against a TiDB instance's Prometheus (hotspots, "
+        "golden signals, per-store flow, metric-name verification). Read-only, SSRF-guarded.",
+    )
+    prometheus_query.add_argument("--instance-id", type=int, required=True)
+    prometheus_query.add_argument("--query", required=True, help="a single instant PromQL expression")
+    prometheus_query.add_argument("--url", help="override Prometheus URL (defaults to saved extra.prometheus_url)")
+    prometheus_query.set_defaults(func=cmd_prometheus_query)
 
     _KB_DB_TYPES = ["oracle", "mysql", "postgres", "tidb", "clickhouse"]
 

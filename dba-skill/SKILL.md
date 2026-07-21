@@ -1,12 +1,12 @@
 ---
 name: dba-skill
-description: Query Database AI Center v2.0.21+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
+description: Query Database AI Center v2.19+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics（含 live 探针下钻 probe-catalog/probe-run）, read-only PromQL against a TiDB cluster's Prometheus（prometheus-query：热点/黄金信号/per-store 流量, v2.63+）, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
 ---
 
 # DBA Skill
 
 ## Overview
-Use this skill as the primary read-only DBA data and analysis workflow for Database AI Center `v2.0.21+`.
+Use this skill as the primary read-only DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes).
 
 Prefer the `/api/v2/dba/*` endpoints. Do not use the legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}` chain as the main path.
 
@@ -49,6 +49,8 @@ python3 scripts/dba_api_client.py probe-catalog --instance-id 12
 python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
 python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
 python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
+python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe full_join_statements
+python3 scripts/dba_api_client.py prometheus-query --instance-id 8 --query 'count(pd_hotspot_status{type="hot_write_region_as_leader"} > 0)'
 python3 scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
 python3 scripts/dba_api_client.py kb-search --keyword ORA-00060 --sort recency
 python3 scripts/dba_api_client.py kb-incidents --root-cause-key "<root_cause_key from kb-search>"
@@ -88,9 +90,11 @@ For alert and diagnosis questions:
 For live evidence drill-down (Database AI Center `v2.19.0+`, server `AI_DIAGNOSTIC_PROBES_ENABLED=true`):
 
 1. Use `probe-catalog --instance-id N` to discover the probes the engine supports and which param each needs.
-2. Run no-parameter snapshot probes first (`probe-run --probe slow_queries|active_sessions|blocking_chain|wait_events|locks|long_transactions|session_waits|resource_pressure`).
+2. Run no-parameter snapshot probes first (`probe-run --probe slow_queries|active_sessions|blocking_chain|wait_events|locks|long_transactions|session_waits|resource_pressure`). `probe-catalog` is authoritative — the engine also exposes targeted probes, e.g. `full_join_statements` (MySQL: the per-digest SQL behind a `mysql_select_full_join_high` no-index-join alert), `error_statements` (TiDB: recently failing statements), and `db_error_log` (ELK-backed error log by host+window).
 3. Drill down multi-round: take a `sql_id` from `slow_queries`/`active_sessions` → `probe-run --probe sql_plan --sql-id <id>` (check full scans / bad plans) → `probe-run --probe index_coverage --object-name <table>` and `probe-run --probe table_stats --object-name <table>` (are filter columns indexed? are optimizer stats stale?). Use `bind_values --sql-id <id>` for parameter-skew, `session_detail --session-id <id>` for one session.
 4. Pass params only via `--sql-id` / `--session-id` / `--object-name`; never construct SQL. The server validates and binds them.
+
+For TiDB cluster-level signals not visible to SQL probes (Database AI Center `v2.63+`), use `prometheus-query --instance-id <cluster-head> --query '<promql>'` — a **read-only** instant PromQL against the cluster's Prometheus (SSRF-guarded, GET-only won't reach it). Use it to check hotspots (`pd_hotspot_status{type="hot_write_region_as_leader"}` per store), per-store request/flow skew (`sum(rate(tikv_grpc_msg_duration_seconds_count[5m])) by (instance)`), leader/region balance, golden signals, and to verify a metric name/value before authoring a rule. Read-only — never a write query.
 
 For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.32+`):
 
@@ -103,7 +107,7 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 The commands above (`resolve`, `context`, `alert-evidence`, `alerts-list`, `classification`,
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
 `directory-options`, `freshness`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
-`probe-catalog`, `probe-run`) are the **analysis core group** — the high-value read endpoints
+`probe-catalog`, `probe-run`, `prometheus-query`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
 questions without needing to discover anything.
 
@@ -144,6 +148,7 @@ Core endpoints:
 - `POST /dba/instances/{instance_id}/diagnostics/run`
 - `GET /instances/{instance_id}/diagnostics/catalog` (live probe catalog, `v2.19.0+`, used by `probe-catalog`)
 - `POST /instances/{instance_id}/diagnostics/probe` (one live whitelisted probe incl. parameterized drill-down, `v2.19.0+`, used by `probe-run`)
+- `POST /instances/{instance_id}/prometheus/query` (read-only instant PromQL against the instance's Prometheus, `v2.63+`, used by `prometheus-query`)
 - `GET /knowledge/entries` (DBA-confirmed root-cause/remediation history, `v2.32+`, used by `kb-search`)
 - `GET /knowledge/entries/{root_cause_key}/incidents` (raw incidents behind a root cause, used by `kb-incidents`)
 - `GET /knowledge/documents/search` (semantic search over curated ops-runbook documents, `v2.39+`, used by `kb-doc-search`)
