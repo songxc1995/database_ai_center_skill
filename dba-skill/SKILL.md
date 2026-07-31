@@ -1,6 +1,6 @@
 ---
 name: dba-skill
-description: Query Database AI Center v2.19+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics（含 live 探针下钻 probe-catalog/probe-run）, read-only PromQL against a TiDB cluster's Prometheus（prometheus-query：热点/黄金信号/per-store 流量, v2.63+）, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
+description: Query Database AI Center v2.19+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics（含 live 探针下钻 probe-catalog/probe-run）, read-only PromQL against a TiDB cluster's Prometheus（prometheus-query：热点/黄金信号/per-store 流量, v2.63+）, ES/ELK database logs（elk-status/elk-coverage/elk-search：按主机+时间+级别+关键词检索 DB 日志, v2.24+）, cloud RDS data（cloud-rightsizing/cloud-cost-history：右规候选/成本, v2.74+）, backup evidence（backups：backup_method + determination「到底有没有备份」判定, v2.98+）, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
 ---
 
 # DBA Skill
@@ -57,6 +57,12 @@ python3 scripts/dba_api_client.py kb-incidents --root-cause-key "<root_cause_key
 python3 scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
 python3 scripts/dba_api_client.py ai-endpoints
 python3 scripts/dba_api_client.py get /dashboard/trends --param hours=6 --param bucket_minutes=15
+python3 scripts/dba_api_client.py elk-status
+python3 scripts/dba_api_client.py elk-coverage
+python3 scripts/dba_api_client.py elk-search --host-ip 10.101.240.83 --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
+python3 scripts/dba_api_client.py cloud-rightsizing --window-days 30 --vendor huawei
+python3 scripts/dba_api_client.py cloud-cost-history
+python3 scripts/dba_api_client.py backups --instance-id 12
 ```
 
 The helper prints JSON to stdout. It prints structured JSON errors to stderr and never prints the API key.
@@ -96,6 +102,16 @@ For live evidence drill-down (Database AI Center `v2.19.0+`, server `AI_DIAGNOST
 
 For TiDB cluster-level signals not visible to SQL probes (Database AI Center `v2.63+`), use `prometheus-query --instance-id <cluster-head> --query '<promql>'` — a **read-only** instant PromQL against the cluster's Prometheus (SSRF-guarded, GET-only won't reach it). Use it to check hotspots (`pd_hotspot_status{type="hot_write_region_as_leader"}` per store), per-store request/flow skew (`sum(rate(tikv_grpc_msg_duration_seconds_count[5m])) by (instance)`), leader/region balance, golden signals, and to verify a metric name/value before authoring a rule. Read-only — never a write query.
 
+For database logs (Database AI Center `v2.24+`), use `elk-status` (are the ELK indices up?), `elk-coverage` (which instances are / are not shipping logs), and `elk-search --host-ip <ip> --levels ERROR,FATAL --start <iso> --end <iso>` to pull actual DB error-log lines as evidence. Search by the instance's host IP; narrow with `--levels` and a time window around the incident.
+
+For cloud RDS (Database AI Center `v2.74+`), use `cloud-rightsizing` (per-instance peaks, downsize candidates, monthly cost + estimated saving; `--vendor aliyun|huawei`, `--window-days`) and `cloud-cost-history` (billing by month/year). These are cost/capacity facts — advisory, never an instruction to resize.
+
+For "does this instance actually have a backup?" (Database AI Center `v2.98+`), use `backups --instance-id <id>`. Read the `determination` field, not the raw status — expdp dumps are invisible to RMAN so the status alone reads as a false "no backup":
+- `verified` — evidence of a successful backup (rman: RMAN record; expdp/external: a reported or offsite record).
+- `declared_no_evidence` — `backup_method` is marked (e.g. expdp) but the platform has received no backup evidence yet. **Not** "no backup" — it means the dump has not been reported in; the fix is to report it (`POST /instances/{id}/backups/report`) or wire the offsite/NAS pipeline.
+- `not_tracked` — `backup_method=none` (deliberately excluded).
+- `unknown` — no `backup_method` mark and no evidence; genuinely undeterminable until the instance is marked. Recommend marking `extra.backup_method` = rman / expdp / none.
+
 For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.32+`):
 
 1. Before concluding a root cause, use `kb-search --q "<symptom in your own words>"` (or `--keyword ORA-xxxxx` for an exact code) to pull DBA-confirmed **symptom → root cause → remediation** history. Prefer `--db-type` to narrow by engine.
@@ -107,7 +123,8 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 The commands above (`resolve`, `context`, `alert-evidence`, `alerts-list`, `classification`,
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
 `directory-options`, `freshness`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
-`probe-catalog`, `probe-run`, `prometheus-query`) are the **analysis core group** — the high-value read endpoints
+`probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
+`cloud-rightsizing`, `cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
 questions without needing to discover anything.
 
@@ -152,6 +169,12 @@ Core endpoints:
 - `GET /knowledge/entries` (DBA-confirmed root-cause/remediation history, `v2.32+`, used by `kb-search`)
 - `GET /knowledge/entries/{root_cause_key}/incidents` (raw incidents behind a root cause, used by `kb-incidents`)
 - `GET /knowledge/documents/search` (semantic search over curated ops-runbook documents, `v2.39+`, used by `kb-doc-search`)
+- `GET /elk/status` (ELK connectivity + which DB-log indices exist, `v2.24+`, used by `elk-status`)
+- `GET /elk/coverage` (managed instances vs ELK log coverage, used by `elk-coverage`)
+- `GET /elk/search` (search DB logs by host + time + level + keyword, used by `elk-search`)
+- `GET /cloud-rds/rightsizing` (cloud RDS right-sizing: peaks, downsize candidates, cost + saving, `v2.74+`, used by `cloud-rightsizing`)
+- `GET /cloud-rds/cost-history` (cloud RDS billing history, used by `cloud-cost-history`)
+- `GET /instances/{instance_id}/backups` (backup status + `backup_method` + `determination` has-backup verdict, `v2.98+`, used by `backups`)
 - `GET /ai-endpoints` (self-describing catalog of model-reachable read endpoints, `v2.47.0+`, used by `ai-endpoints`; drill into any listed path with `get`)
 
 ## Safety Rules

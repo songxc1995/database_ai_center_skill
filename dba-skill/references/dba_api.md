@@ -299,6 +299,41 @@ Semantic search over curated ops-runbook documents (`.md/.txt/.pdf/.docx` import
 
 Usage: treat hits as prior evidence/references, not ground truth — weigh against current live evidence and note when a conclusion matches a confirmed past root cause.
 
+## Database logs — ELK (`v2.24+`)
+
+### `GET /elk/status` (helper: `elk-status`)
+
+ELK connectivity + which DB-log indices exist. No params. Use first to confirm logs are reachable before searching.
+
+### `GET /elk/coverage` (helper: `elk-coverage`)
+
+Managed instances vs ELK log coverage — which instances are / are not shipping logs. No params.
+
+### `GET /elk/search` (helper: `elk-search`)
+
+Search DB logs by host + time + level + keyword. Query params: `host_ip`, `host_name`, `start` (ISO 8601), `end` (ISO 8601), `levels` (comma-separated, e.g. `ERROR,FATAL`), `query_string` (ES query_string), `index` (pattern override), `size` (1-1000, default 200). Search by the instance's host IP; narrow with `levels` + a time window around the incident. Returns actual log lines as evidence — never invent log content.
+
+## Cloud RDS (`v2.74+`)
+
+### `GET /cloud-rds/rightsizing` (helper: `cloud-rightsizing`)
+
+Per-instance trailing-window peaks (CPU/mem/disk %), downsize candidacy, and cost + estimated saving. Query params: `window_days` (1-90, default 90), `cpu_max` (default 40), `mem_max` (default 70), `vendor` (`aliyun`|`huawei`). Cost totals are per-vendor. Advisory — never an instruction to resize.
+
+### `GET /cloud-rds/cost-history` (helper: `cloud-cost-history`)
+
+Cloud RDS billing history (gross / paid / coupon) by month and year. No params.
+
+## Backup determination (`v2.98+`)
+
+### `GET /instances/{instance_id}/backups` (helper: `backups`)
+
+One instance's backup status plus the evidence-based has-backup verdict. Query params: `refresh` (bool; forces a slow live Oracle RMAN pull — default serves the daily-swept stored status). Response adds `backup_method` (declared: rman/expdp/external/reported/none, or null) and `determination` + `determination_reason`:
+
+- `verified` — evidence of a successful backup (rman → RMAN record; expdp/external → a reported or offsite record).
+- `declared_no_evidence` — `backup_method` marked but no backup evidence received. **Not** "no backup" — the dump has not been reported; fix by `POST /instances/{id}/backups/report` or the offsite/NAS pipeline. (★ expdp is invisible to RMAN, so a live-RMAN row is ignored for expdp instances — a stale RMAN remnant is not counted as evidence.)
+- `not_tracked` — `backup_method=none`.
+- `unknown` — unmarked and no evidence; undeterminable until `extra.backup_method` is set. Read `determination`, not the raw `summary.status`.
+
 ## Capabilities catalog (long-tail drill-in)
 
 ### `GET /ai-endpoints`

@@ -404,6 +404,63 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/topology")
 
+    # ── ELK log evidence ──
+    def test_elk_status_hits_the_status_endpoint(self):
+        result = self.run_client("elk-status")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/elk/status")
+
+    def test_elk_coverage_hits_the_coverage_endpoint(self):
+        result = self.run_client("elk-coverage")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/elk/coverage")
+
+    def test_elk_search_sends_host_time_and_level_filters(self):
+        result = self.run_client(
+            "elk-search", "--host-ip", "10.101.240.83", "--levels", "ERROR,FATAL",
+            "--start", "2026-07-30T00:00:00Z", "--size", "50",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/elk/search")
+        self.assertEqual(request["query"]["host_ip"], ["10.101.240.83"])
+        self.assertEqual(request["query"]["levels"], ["ERROR,FATAL"])
+        self.assertEqual(request["query"]["start"], ["2026-07-30T00:00:00Z"])
+        self.assertEqual(request["query"]["size"], ["50"])
+
+    # ── cloud data ──
+    def test_cloud_rightsizing_sends_window_and_vendor(self):
+        result = self.run_client("cloud-rightsizing", "--window-days", "30", "--vendor", "huawei")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/cloud-rds/rightsizing")
+        self.assertEqual(request["query"]["window_days"], ["30"])
+        self.assertEqual(request["query"]["vendor"], ["huawei"])
+
+    def test_cloud_cost_history_hits_the_endpoint(self):
+        result = self.run_client("cloud-cost-history")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/cloud-rds/cost-history")
+
+    # ── backup determination ──
+    def test_backups_hits_the_instance_backups_endpoint(self):
+        RecordingHandler.responses = {
+            "/api/v2/instances/12/backups": (
+                200, {"instance_id": 12, "backup_method": "expdp", "determination": "declared_no_evidence"},
+            )
+        }
+        result = self.run_client("backups", "--instance-id", "12")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["path"], "/api/v2/instances/12/backups")
+        # refresh defaults off → not sent (None is dropped by _clean_params)
+        self.assertNotIn("refresh", RecordingHandler.requests[0]["query"])
+        self.assertEqual(json.loads(result.stdout)["determination"], "declared_no_evidence")
+
+    def test_backups_refresh_flag_is_forwarded(self):
+        result = self.run_client("backups", "--instance-id", "7", "--refresh")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(RecordingHandler.requests[0]["query"]["refresh"], ["true"])
+
 
 if __name__ == "__main__":
     unittest.main()

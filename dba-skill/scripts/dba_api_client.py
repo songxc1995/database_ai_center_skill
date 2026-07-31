@@ -483,6 +483,59 @@ def cmd_kb_doc_search(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_elk_status(args: argparse.Namespace) -> Any:
+    return _request("GET", "/elk/status")
+
+
+def cmd_elk_coverage(args: argparse.Namespace) -> Any:
+    return _request("GET", "/elk/coverage")
+
+
+def cmd_elk_search(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/elk/search",
+        params={
+            "host_ip": args.host_ip,
+            "host_name": args.host_name,
+            "start": args.start,
+            "end": args.end,
+            "levels": args.levels,
+            "query_string": args.query_string,
+            "index": args.index,
+            "size": args.size,
+        },
+    )
+
+
+def cmd_cloud_rightsizing(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/cloud-rds/rightsizing",
+        params={
+            "window_days": args.window_days,
+            "cpu_max": args.cpu_max,
+            "mem_max": args.mem_max,
+            "vendor": args.vendor,
+        },
+    )
+
+
+def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
+    return _request("GET", "/cloud-rds/cost-history")
+
+
+def cmd_backups(args: argparse.Namespace) -> Any:
+    # Surfaces backup_method + determination (verified / declared_no_evidence / not_tracked /
+    # unknown) so the answer to "does this instance actually have a backup?" is explicit —
+    # expdp dumps are invisible to RMAN, so the raw status alone reads as a false "no backup".
+    return _request(
+        "GET",
+        f"/instances/{args.instance_id}/backups",
+        params={"refresh": args.refresh or None},
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -667,6 +720,55 @@ def build_parser() -> argparse.ArgumentParser:
     kb_doc_search.add_argument("--q", required=True)
     kb_doc_search.add_argument("--limit", type=int)
     kb_doc_search.set_defaults(func=cmd_kb_doc_search)
+
+    elk_status = sub.add_parser(
+        "elk-status", help="ELK connectivity + which DB-log indices exist (v2.24+)"
+    )
+    elk_status.set_defaults(func=cmd_elk_status)
+
+    elk_coverage = sub.add_parser(
+        "elk-coverage", help="Managed instances vs ELK log coverage (who is / isn't shipping logs)"
+    )
+    elk_coverage.set_defaults(func=cmd_elk_coverage)
+
+    elk_search = sub.add_parser(
+        "elk-search", help="Search DB logs by host + time window + level + keyword"
+    )
+    elk_search.add_argument("--host-ip", help="DB host IP")
+    elk_search.add_argument("--host-name", help="DB hostname fallback")
+    elk_search.add_argument("--start", help="Start time (ISO 8601)")
+    elk_search.add_argument("--end", help="End time (ISO 8601)")
+    elk_search.add_argument("--levels", help="Comma-separated log levels, e.g. ERROR,FATAL")
+    elk_search.add_argument("--query-string", help="ES query_string filter")
+    elk_search.add_argument("--index", help="Index pattern override")
+    elk_search.add_argument("--size", type=int, default=200, help="Max rows (1-1000)")
+    elk_search.set_defaults(func=cmd_elk_search)
+
+    cloud_rightsizing = sub.add_parser(
+        "cloud-rightsizing",
+        help="Cloud RDS right-sizing readout: per-instance peaks, downsize candidates, cost + saving (v2.74+)",
+    )
+    cloud_rightsizing.add_argument("--window-days", type=int, help="Trailing peak window (1-90, default 90)")
+    cloud_rightsizing.add_argument("--cpu-max", type=float, help="Candidate CPU ceiling %% (default 40)")
+    cloud_rightsizing.add_argument("--mem-max", type=float, help="Memory-pressure impediment %% (default 70)")
+    cloud_rightsizing.add_argument("--vendor", choices=["aliyun", "huawei"], help="Restrict to one provider")
+    cloud_rightsizing.set_defaults(func=cmd_cloud_rightsizing)
+
+    cloud_cost_history = sub.add_parser(
+        "cloud-cost-history", help="Cloud RDS billing history (gross / paid / coupon by month + year)"
+    )
+    cloud_cost_history.set_defaults(func=cmd_cloud_cost_history)
+
+    backups = sub.add_parser(
+        "backups",
+        help="One instance's backup status + evidence-based determination (has-backup verdict; v2.98+)",
+    )
+    backups.add_argument("--instance-id", type=int, required=True)
+    backups.add_argument(
+        "--refresh", action="store_true",
+        help="Force a live Oracle RMAN refresh (slow); default serves the stored daily-swept status",
+    )
+    backups.set_defaults(func=cmd_backups)
 
     return parser
 
