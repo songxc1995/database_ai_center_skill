@@ -10,9 +10,45 @@ Use this skill as the primary read-only DBA data and analysis workflow for Datab
 
 Prefer the `/api/v2/dba/*` endpoints. Do not use the legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}` chain as the main path.
 
-Use the read-only `alerts-list` helper for broad current alert inventory questions until a dedicated `/dba/alerts` list endpoint exists.
+Use `GET /dba/alerts` for broad current alert inventory questions (v3.32+): a flat list with instance name/host/type inlined and the triggering `actual`/`threshold` lifted out of the evidence blob, so one call answers "what is alerting right now".
 
 Use `zabbix-readonly` only as supporting host evidence when Database AI Center data is insufficient for CPU, memory, disk, filesystem, load, or I/O questions.
+
+## Reading the data honestly (v3.32+)
+
+These are the places where a confident-sounding answer is most likely to be wrong. Read them
+before summarising anything.
+
+**Backups have two independent tracks.** Local (RMAN/expdp) and remote/offsite (NAS) are
+separate rows that can disagree, and prod has had an instance reading `determination=verified`
+/ `status=success` locally while its offsite copy had failed for two days and had never once
+succeeded. Never answer "is this backed up?" from one track. Both
+`GET /instances/{id}/backups` and `GET /instances/{id}/remote-backups` now carry a summary of
+the other (`remote` / `local`). For the fleet-wide question use `GET /dba/backups/coverage`.
+`tracked: false` means **nobody ships this instance offsite** — that is not the same as "fine",
+and must never be reported as healthy.
+
+**Metric values carry the platform's own doubts.** Each row from
+`GET /metrics/{id}/latest` may include `data_quality` (`drift` / `outlier` / `null_value` with
+severity). About a third of the fleet has at least one flagged metric. If a value you are about
+to quote is flagged, say so; do not present it as a clean fact. `data_quality: null` means no
+open finding — that absence is information, not a missing field.
+
+**Gaps are reported, never omitted.** `GET /dba/capacity/forecast` returns instances it could
+not project under `gaps` with a reason (pass `include_gaps=true`). Diagnostic probes return
+`available: false` plus `evidence_gaps`. An empty list or a `0` that came from a failed
+collection is a gap, not a healthy reading — check for the gap fields before concluding
+"no problem found".
+
+**"Not alerting" has five possible causes.** Use
+`GET /dba/instances/{id}/silence-report` rather than inferring. It always lists all five
+mechanisms (alert silence, backup window, TiDB component roll-up, cloud-managed suppression,
+rules disabled by override), including the inactive ones, so you can tell you checked
+everywhere instead of concluding "nothing is suppressed" after looking at two.
+
+**Capacity questions are not alert questions.** `GET /dba/capacity/forecast` returns
+projections whether or not they are urgent enough to alert; `would_alert` is a field, not a
+filter. A trend 60 days out will never appear in the alert list — that lead time is the point.
 
 ## Required Config
 Read these values from environment variables or runtime config:
@@ -163,6 +199,10 @@ Core endpoints:
 - `GET /dba/instances/{instance_id}/freshness`
 - `GET /dba/instances/{instance_id}/diagnostics/catalog`
 - `POST /dba/instances/{instance_id}/diagnostics/run`
+- `GET /dba/alerts` (v3.32+) — flat alert list, instance inlined
+- `GET /dba/instances/{instance_id}/silence-report` (v3.32+) — why this instance might not be alerting
+- `GET /dba/backups/coverage` (v3.32+) — fleet backup coverage across both tracks
+- `GET /dba/capacity/forecast` (v3.32+) — projected exhaustion, alerting or not
 - `GET /instances/{instance_id}/diagnostics/catalog` (live probe catalog, `v2.19.0+`, used by `probe-catalog`)
 - `POST /instances/{instance_id}/diagnostics/probe` (one live whitelisted probe incl. parameterized drill-down, `v2.19.0+`, used by `probe-run`)
 - `POST /instances/{instance_id}/prometheus/query` (read-only instant PromQL against the instance's Prometheus, `v2.63+`, used by `prometheus-query`)
