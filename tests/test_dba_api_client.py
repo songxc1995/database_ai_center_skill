@@ -384,6 +384,64 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(request["method"], "GET")
         self.assertEqual(request["path"], "/api/v2/ai-endpoints")
 
+
+    # ── v3.32+ 策展命令 ─────────────────────────────────────────────
+    # 这四个命令是手工连生产验证过的,但手工验证挡不住回归:改错一个路径或参数名,
+    # 在没有测试的情况下不会有任何东西变红。今天平台侧已经三次出现「手工验证过仍然错」。
+
+    def test_alerts_uses_the_flat_dba_list_not_the_paginated_ui_endpoint(self):
+        result = self.run_client("alerts")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/dba/alerts")
+        # 默认只问当前在响的 —— 问「现在有哪些告警」几乎不会是想要历史全量
+        self.assertEqual(request["query"]["status"], ["active"])
+
+    def test_backups_coverage_defaults_to_at_risk(self):
+        """问「哪些库没有有效备份」九成是想知道什么坏了;默认给全量 188 台等于把筛选推回调用方。"""
+        result = self.run_client("backups-coverage")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/dba/backups/coverage")
+        self.assertEqual(request["query"]["verdict"], ["at_risk"])
+
+    def test_backups_coverage_all_drops_the_verdict_filter(self):
+        result = self.run_client("backups-coverage", "--verdict", "all")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertNotIn("verdict", request["query"])
+
+    def test_capacity_forecast_can_ask_for_the_gaps(self):
+        """测不出的实例必须能显式看到 —— 从列表里消失会被读成「这台没有容量风险」。"""
+        result = self.run_client("capacity-forecast", "--include-gaps", "--max-days", "90")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/dba/capacity/forecast")
+        self.assertEqual(request["query"]["include_gaps"], ["true"])
+        self.assertEqual(request["query"]["max_days"], ["90.0"])
+
+    def test_capacity_forecast_omits_include_gaps_when_not_asked(self):
+        result = self.run_client("capacity-forecast")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertNotIn("include_gaps", RecordingHandler.requests[0]["query"])
+
+    def test_silence_report_targets_one_instance(self):
+        result = self.run_client("silence-report", "--instance-id", "3")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["path"], "/api/v2/dba/instances/3/silence-report")
+
+    def test_silence_report_requires_an_instance(self):
+        """漏传实例时必须报错,而不是悄悄查了别的东西。"""
+        result = self.run_client("silence-report")
+        self.assertNotEqual(result.returncode, 0)
+
     def test_get_fetches_arbitrary_read_path_with_params(self):
         result = self.run_client(
             "get", "/dashboard/trends", "--param", "hours=6", "--param", "bucket_minutes=15"

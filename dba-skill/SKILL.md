@@ -192,7 +192,7 @@ Prefer a dedicated core command when one exists — it carries typed filters and
 Use `ai-endpoints` + `get` for the long tail, not as a replacement for the core group.
 
 ## Endpoint Map
-See `references/dba_api.md` for parameters, field semantics, examples, and error handling.
+See `references/dba_api.md` for the semantics and pitfalls that a schema cannot express (two-track backups, data-quality flags, how gaps are reported, why an instance may not be alerting). It deliberately does **not** list endpoints — use `ai-endpoints` and `probe-catalog` for that, so discovery cannot go stale.
 
 Core endpoints:
 
