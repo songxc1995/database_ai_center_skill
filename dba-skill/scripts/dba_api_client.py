@@ -258,6 +258,72 @@ def cmd_alert_evidence(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_alerts(args: argparse.Namespace) -> Any:
+    """Flat current-alert list (platform v3.32+).
+
+    Prefer this over ``alerts-list``: the instance name/host/type are inlined and the
+    triggering actual/threshold are lifted out of the evidence blob, so answering "what is
+    alerting right now" is one call with no per-alert follow-up and no wading through the
+    platform's internal ``_dac_*`` bookkeeping fields.
+    """
+    return _request(
+        "GET",
+        "/dba/alerts",
+        params={
+            "status": args.status,
+            "severity": args.severity,
+            "instance_id": args.instance_id,
+            "limit": args.limit,
+        },
+    )
+
+
+def cmd_backups_coverage(args: argparse.Namespace) -> Any:
+    """Fleet backup coverage across BOTH tracks (local RMAN/expdp + offsite NAS).
+
+    Defaults to ``at_risk`` because that is what the question almost always means; pass
+    ``--verdict all`` for the whole estate. ``not_applicable`` covers cloud RDS (the provider
+    backs those up) and cluster components (backup is cluster-level) — counting them as
+    at-risk buries the real findings, so they are a separate bucket, not a failure.
+    """
+    verdict = None if args.verdict == "all" else args.verdict
+    return _request(
+        "GET",
+        "/dba/backups/coverage",
+        params={"verdict": verdict, "instance_type": args.instance_type, "limit": args.limit},
+    )
+
+
+def cmd_capacity_forecast(args: argparse.Namespace) -> Any:
+    """Projected resource exhaustion — including trends too far out to alert.
+
+    ``would_alert`` is reported per row rather than used as a filter: a tablespace 200 days
+    from full never appears in the alert list, and that lead time is the whole point. Pass
+    ``--include-gaps`` to also see the instances that could NOT be projected, with reasons —
+    an instance missing from the list is not the same as an instance with no risk.
+    """
+    return _request(
+        "GET",
+        "/dba/capacity/forecast",
+        params={
+            "metric_name": args.metric_name,
+            "max_days": args.max_days,
+            "include_gaps": "true" if args.include_gaps else None,
+            "limit": args.limit,
+        },
+    )
+
+
+def cmd_silence_report(args: argparse.Namespace) -> Any:
+    """Why one instance might not be alerting — all five mechanisms, active or not.
+
+    Checking two of the five and concluding "nothing is suppressed" is the failure this
+    replaces; inactive mechanisms are listed precisely so the caller can tell it looked
+    everywhere.
+    """
+    return _request("GET", "/dba/instances/{0}/silence-report".format(args.instance_id))
+
+
 def cmd_alerts_list(args: argparse.Namespace) -> Any:
     return _request(
         "GET",
@@ -563,6 +629,44 @@ def build_parser() -> argparse.ArgumentParser:
     alert_evidence.add_argument("--before-hours", type=int)
     alert_evidence.add_argument("--after-hours", type=int)
     alert_evidence.set_defaults(func=cmd_alert_evidence)
+
+    alerts_v2 = sub.add_parser(
+        "alerts",
+        help="Current alerts, flat, instance inlined (v3.32+; prefer over alerts-list)",
+    )
+    alerts_v2.add_argument("--status", default="active", choices=["active", "resolved", "all"])
+    alerts_v2.add_argument("--severity")
+    alerts_v2.add_argument("--instance-id", type=int)
+    alerts_v2.add_argument("--limit", type=_positive_int, default=200)
+    alerts_v2.set_defaults(func=cmd_alerts)
+
+    bcov = sub.add_parser(
+        "backups-coverage",
+        help="Fleet backup coverage, both tracks (v3.32+); defaults to at_risk only",
+    )
+    bcov.add_argument("--verdict", default="at_risk",
+                      choices=["at_risk", "ok", "warning", "indeterminate",
+                               "remote_untracked", "not_applicable", "suppressed", "all"])
+    bcov.add_argument("--instance-type")
+    bcov.add_argument("--limit", type=_positive_int, default=500)
+    bcov.set_defaults(func=cmd_backups_coverage)
+
+    capf = sub.add_parser(
+        "capacity-forecast",
+        help="Projected exhaustion incl. trends below the alert threshold (v3.32+)",
+    )
+    capf.add_argument("--metric-name")
+    capf.add_argument("--max-days", type=float)
+    capf.add_argument("--include-gaps", action="store_true")
+    capf.add_argument("--limit", type=_positive_int, default=500)
+    capf.set_defaults(func=cmd_capacity_forecast)
+
+    silr = sub.add_parser(
+        "silence-report",
+        help="Why an instance might not be alerting: all 5 mechanisms (v3.32+)",
+    )
+    silr.add_argument("--instance-id", type=int, required=True)
+    silr.set_defaults(func=cmd_silence_report)
 
     alerts = sub.add_parser("alerts-list")
     alerts.add_argument("--status", default="active")

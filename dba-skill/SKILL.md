@@ -10,7 +10,11 @@ Use this skill as the primary read-only DBA data and analysis workflow for Datab
 
 Prefer the `/api/v2/dba/*` endpoints. Do not use the legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}` chain as the main path.
 
-Use `GET /dba/alerts` for broad current alert inventory questions (v3.32+): a flat list with instance name/host/type inlined and the triggering `actual`/`threshold` lifted out of the evidence blob, so one call answers "what is alerting right now".
+Use the `alerts` helper command (`GET /dba/alerts`, v3.32+) for broad current alert inventory
+questions: a flat list with instance name/host/type inlined and the triggering
+`actual`/`threshold` lifted out of the evidence blob, so one call answers "what is alerting
+right now". The older `alerts-list` hits the paginated UI endpoint and hands back the raw
+evidence blob including the platform's internal `_dac_*` bookkeeping fields — prefer `alerts`.
 
 Use `zabbix-readonly` only as supporting host evidence when Database AI Center data is insufficient for CPU, memory, disk, filesystem, load, or I/O questions.
 
@@ -45,6 +49,13 @@ collection is a gap, not a healthy reading — check for the gap fields before c
 mechanisms (alert silence, backup window, TiDB component roll-up, cloud-managed suppression,
 rules disabled by override), including the inactive ones, so you can tell you checked
 everywhere instead of concluding "nothing is suppressed" after looking at two.
+
+**Never guess a query parameter name.** From v3.33.3 the platform rejects unknown query
+parameters with 422 and lists the accepted ones — before that it silently ignored them and
+returned *unfiltered* results with a 200, so `?database_name=x` looked like it filtered and
+handed back an unrelated database's owner. If a 422 names an unknown parameter, read the
+`accepted_params` it returns rather than trying another guess. Free-text database search is
+`--q` / `q=`, not `database_name`.
 
 **Capacity questions are not alert questions.** `GET /dba/capacity/forecast` returns
 projections whether or not they are urgent enough to alert; `would_alert` is a field, not a
@@ -199,10 +210,10 @@ Core endpoints:
 - `GET /dba/instances/{instance_id}/freshness`
 - `GET /dba/instances/{instance_id}/diagnostics/catalog`
 - `POST /dba/instances/{instance_id}/diagnostics/run`
-- `GET /dba/alerts` (v3.32+) — flat alert list, instance inlined
-- `GET /dba/instances/{instance_id}/silence-report` (v3.32+) — why this instance might not be alerting
-- `GET /dba/backups/coverage` (v3.32+) — fleet backup coverage across both tracks
-- `GET /dba/capacity/forecast` (v3.32+) — projected exhaustion, alerting or not
+- `GET /dba/alerts` (v3.32+) — flat alert list, instance inlined — helper: `alerts`
+- `GET /dba/instances/{instance_id}/silence-report` (v3.32+) — why this instance might not be alerting — helper: `silence-report`
+- `GET /dba/backups/coverage` (v3.32+) — fleet backup coverage across both tracks — helper: `backups-coverage` (defaults to `at_risk`)
+- `GET /dba/capacity/forecast` (v3.32+) — projected exhaustion, alerting or not — helper: `capacity-forecast`
 - `GET /instances/{instance_id}/diagnostics/catalog` (live probe catalog, `v2.19.0+`, used by `probe-catalog`)
 - `POST /instances/{instance_id}/diagnostics/probe` (one live whitelisted probe incl. parameterized drill-down, `v2.19.0+`, used by `probe-run`)
 - `POST /instances/{instance_id}/prometheus/query` (read-only instant PromQL against the instance's Prometheus, `v2.63+`, used by `prometheus-query`)
