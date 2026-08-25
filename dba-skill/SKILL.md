@@ -155,7 +155,7 @@ For cloud RDS (Database AI Center `v2.74+`), use `cloud-rightsizing` (per-instan
 
 For "does this instance actually have a backup?" (Database AI Center `v2.98+`), use `backups --instance-id <id>`. Read the `determination` field, not the raw status — expdp dumps are invisible to RMAN so the status alone reads as a false "no backup":
 - `verified` — evidence of a successful backup (rman: RMAN record; expdp/external: a reported or offsite record).
-- `declared_no_evidence` — `backup_method` is marked (e.g. expdp) but the platform has received no backup evidence yet. **Not** "no backup" — it means the dump has not been reported in; the fix is to report it (`POST /instances/{id}/backups/report`) or wire the offsite/NAS pipeline.
+- `declared_no_evidence` — `backup_method` is marked (e.g. expdp) but the platform has received no backup evidence yet. **Not** "no backup" — it means the dump has not been reported in; the fix is to report it (`POST /instances/{instance_id}/backups/report`) or wire the offsite/NAS pipeline. That is a write and an `ai-client` key cannot call it — say what needs doing rather than attempting it.
 - `not_tracked` — `backup_method=none` (deliberately excluded).
 - `unknown` — no `backup_method` mark and no evidence; genuinely undeterminable until the instance is marked. Recommend marking `extra.backup_method` = rman / expdp / none.
 
@@ -192,41 +192,42 @@ Prefer a dedicated core command when one exists — it carries typed filters and
 Use `ai-endpoints` + `get` for the long tail, not as a replacement for the core group.
 
 ## Endpoint Map
-See `references/dba_api.md` for the semantics and pitfalls that a schema cannot express (two-track backups, data-quality flags, how gaps are reported, why an instance may not be alerting). It deliberately does **not** list endpoints — use `ai-endpoints` and `probe-catalog` for that, so discovery cannot go stale.
+See `references/dba_api.md` for the semantics and pitfalls that a schema cannot express (metric-name spellings, two-track backups, data-quality flags, how gaps are reported, why an instance may not be alerting).
 
-Core endpoints:
+**Endpoints are discovered, not listed here.** `ai-endpoints` is derived from the live routes and their role grants, so it cannot drift; this file used to carry a hand-kept list and it drifted anyway — 36 entries against 84 reachable endpoints, missing every one added after platform v3.32. A list that lags is worse than no list, because it reads as complete. Use `ai-endpoints` for the surface and `get <path>` to call anything on it.
 
-- `GET /alerts` (read-only current alert list used by `alerts-list`)
-- `GET /instances/classification` (instance topology / cloud-RDS / backup inventory, used by `classification`)
-- `GET /dba/resolve`
-- `GET /dba/context`
-- `GET /dba/alerts/{alert_id}/evidence`
-- `GET /dba/inventory/summary`
-- `GET /dba/databases/search`
-- `GET /dba/databases/unused`
-- `GET /dba/ownership/scope`
-- `GET /dba/directory/options`
-- `GET /dba/instances/{instance_id}/timeline`
-- `GET /dba/instances/{instance_id}/freshness`
-- `GET /dba/instances/{instance_id}/diagnostics/catalog`
-- `POST /dba/instances/{instance_id}/diagnostics/run`
-- `GET /dba/alerts` (v3.32+) — flat alert list, instance inlined — helper: `alerts`
-- `GET /dba/instances/{instance_id}/silence-report` (v3.32+) — why this instance might not be alerting — helper: `silence-report`
-- `GET /dba/backups/coverage` (v3.32+) — fleet backup coverage across both tracks — helper: `backups-coverage` (defaults to `at_risk`)
-- `GET /dba/capacity/forecast` (v3.32+) — projected exhaustion, alerting or not — helper: `capacity-forecast`
-- `GET /instances/{instance_id}/diagnostics/catalog` (live probe catalog, `v2.19.0+`, used by `probe-catalog`)
-- `POST /instances/{instance_id}/diagnostics/probe` (one live whitelisted probe incl. parameterized drill-down, `v2.19.0+`, used by `probe-run`)
-- `POST /instances/{instance_id}/prometheus/query` (read-only instant PromQL against the instance's Prometheus, `v2.63+`, used by `prometheus-query`)
-- `GET /knowledge/entries` (DBA-confirmed root-cause/remediation history, `v2.32+`, used by `kb-search`)
-- `GET /knowledge/entries/{root_cause_key}/incidents` (raw incidents behind a root cause, used by `kb-incidents`)
-- `GET /knowledge/documents/search` (semantic search over curated ops-runbook documents, `v2.39+`, used by `kb-doc-search`)
-- `GET /elk/status` (ELK connectivity + which DB-log indices exist, `v2.24+`, used by `elk-status`)
-- `GET /elk/coverage` (managed instances vs ELK log coverage, used by `elk-coverage`)
-- `GET /elk/search` (search DB logs by host + time + level + keyword, used by `elk-search`)
-- `GET /cloud-rds/rightsizing` (cloud RDS right-sizing: peaks, downsize candidates, cost + saving, `v2.74+`, used by `cloud-rightsizing`)
-- `GET /cloud-rds/cost-history` (cloud RDS billing history, used by `cloud-cost-history`)
-- `GET /instances/{instance_id}/backups` (backup status + `backup_method` + `determination` has-backup verdict, `v2.98+`, used by `backups`)
-- `GET /ai-endpoints` (self-describing catalog of model-reachable read endpoints, `v2.47.0+`, used by `ai-endpoints`; drill into any listed path with `get`)
+What follows is only the **command → endpoint** mapping, which discovery genuinely cannot give you: it says which questions already have a helper carrying typed filters and safer defaults. Anything not here is still reachable with `get`.
+
+| Command | Endpoint |
+| --- | --- |
+| `resolve` | `GET /dba/resolve` |
+| `context` | `GET /dba/context` |
+| `alerts` | `GET /dba/alerts` |
+| `alerts-list` | `GET /alerts` (compat path) |
+| `alert-evidence` | `GET /dba/alerts/{alert_id}/evidence` |
+| `silence-report` | `GET /dba/instances/{instance_id}/silence-report` |
+| `capacity-forecast` | `GET /dba/capacity/forecast` |
+| `backups` | `GET /instances/{instance_id}/backups` |
+| `backups-coverage` | `GET /dba/backups/coverage` |
+| `classification` | `GET /instances/classification` |
+| `inventory-summary` | `GET /dba/inventory/summary` |
+| `databases-search` | `GET /dba/databases/search` |
+| `databases-unused` | `GET /dba/databases/unused` |
+| `ownership-scope` | `GET /dba/ownership/scope` |
+| `directory-options` | `GET /dba/directory/options` |
+| `timeline` | `GET /dba/instances/{instance_id}/timeline` |
+| `freshness` | `GET /dba/instances/{instance_id}/freshness` |
+| `diagnostics-catalog` / `diagnostics-run` | `GET`/`POST /dba/instances/{instance_id}/diagnostics/...` |
+| `probe-catalog` / `probe-run` | `GET`/`POST /instances/{instance_id}/diagnostics/...` (live, rate-limited) |
+| `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
+| `kb-search` / `kb-incidents` / `kb-doc-search` | `GET /knowledge/...` |
+| `elk-status` / `elk-coverage` / `elk-search` | `GET /elk/...` |
+| `cloud-rightsizing` / `cloud-cost-history` | `GET /cloud-rds/...` |
+| `ai-endpoints` | `GET /ai-endpoints` (the catalogue itself) |
+| `get <path>` | anything else in the catalogue |
+
+Frequently useful paths that have **no** helper — reach them with `get`:
+`/dba/fleet/metric-names` (metric vocabulary), `/dba/fleet/metrics` (one metric across the fleet), `/dba/fleet/health` (fleet health scores), `/observability/main-chain` and `/observability/self-check` (is the platform itself healthy), `/ai/observability` (is AI analysis succeeding), `/ai/rag/status` (is knowledge retrieval available).
 
 ## Safety Rules
 - Use only returned API data and returned Zabbix data.
