@@ -50,17 +50,18 @@ ZABBIX_VERIFY_TLS=true
 
 - Main skill prompt and workflow: `dba-skill/SKILL.md`
 - DBA API semantics and pitfalls: `dba-skill/references/dba_api.md`
-- **Third-party model teams** (no repo access, HTTP only): `docs/external-skill-quickstart.md`
-  in the platform repo — self-contained, and it lives next to the API it describes.
+- **Platform-side API semantics**: `docs/dba-skill-api.md` in the platform repo — it lives
+  next to the API it describes, so it changes in the same commit as the API.
 
-> There is deliberately **no separate handoff file here.** There used to be
-> (`dba-skill/HANDOFF.md`), and it had no audience of its own: agents loading the skill read
-> `SKILL.md`, third parties read the platform repo's quickstart. What it did have was drift —
-> a copy of an API description, one repo away from the API, cannot be updated in the same
-> commit as the change it describes. By the time it was removed it still claimed to target
-> `v2.0.21+` (the platform had shipped 40+ releases since) and listed 13 endpoints out of 84.
-> If a single-file deliverable is needed again, extend the platform repo's quickstart rather
-> than re-creating a second copy here.
+> There is deliberately **no separate handoff file.** Two used to exist —
+> `dba-skill/HANDOFF.md` here and `docs/external-skill-quickstart.md` in the platform repo —
+> and both were copies of this skill's prompt kept somewhere the prompt is not maintained.
+> Copies only drift: by the time HANDOFF was removed (2026-09-01) it still claimed to target
+> `v2.0.21+` while the platform had shipped 40+ releases, and listed 13 endpoints out of 84.
+>
+> **The split is: the platform repo documents the API, this repo documents the skill.**
+> `SKILL.md` is the single authoritative prompt. If a one-file deliverable is ever needed for
+> a third party, generate it from `SKILL.md` rather than hand-maintaining a third copy.
 
 ## Compatibility Notes
 
