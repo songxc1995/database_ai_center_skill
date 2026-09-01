@@ -74,11 +74,31 @@ hits out of 155 measured is a different statement from three out of 20.
 ## Inventory counts are about databases, not instances
 
 `inventory-summary`'s `total_instances` counts instances **appearing in the matched database
-rows** — it is not the fleet size. On the current estate it reads 70 while 169 instances are
-eligible, because 98 have never had a database discovered. The `coverage` block carries
-`instances_in_scope` / `instances_without_databases`, and every count's meaning is in the
-response's own `definitions` block. Read those rather than assuming a count means what its
-name suggests.
+rows** — it is not the fleet size. The `coverage` block carries the denominator, and every
+count's meaning is in the response's own `definitions`. Read those rather than assuming a
+count means what its name suggests. Three need care:
+
+- `instances_without_databases` is **the gap**: nothing recorded, and nothing holding it for
+  them either. It still does not distinguish "discovery never ran" from "discovery ran and
+  found none".
+- `instances_covered_by_cluster_owner` are cluster members holding nothing **by design** —
+  RAC nodes mount one database and a standby is a copy, so only the cluster's elected owner
+  carries the rows. These are *not* a gap; folding them in once made the number read as
+  2 → 20 overnight.
+- `excluded_component_instances` are TiDB PD/TiKV/TiFlash sub-instances, which hold no
+  databases at all.
+
+Until 2026-08-31 discovery had no scheduled job, so 98 of 169 eligible instances had never
+had a single database discovered — "never discovered" and "has no databases" were the same
+empty list. That is closed (nightly sweep + one-time backfill); what remains is a handful the
+cloud control plane genuinely reports as empty.
+
+## A cluster member with no databases is not a gap
+
+`instances/{id}` carries `database_inventory_coverage` (`owns` / `cluster_covered` /
+`cluster_component`) and `database_inventory_owner_instance_id`. On a `cluster_covered`
+member an empty database list is correct — read the owner instead. Refreshing a non-owner is
+refused with a 409 naming the owner.
 
 ## Backups have two independent tracks
 
@@ -110,6 +130,30 @@ finding* — the absence is information, not a missing field.
   (`permission_denied` / `unsupported` / `error`) instead of an empty result.
 - A `0` or an empty list that came from a failed collection is a gap. Check the gap fields
   before concluding "no problem found".
+
+## "The alert fired but nobody was told" is a different question
+
+`silence-report` answers *why no alert*. For *an alert exists but no notification arrived*,
+read `ai/observability`'s `audit_trail`. Four sources appear there; the one that used to be
+missing is `routing_skip`, which records every routing decision that did not end in a
+dispatch job:
+
+```text
+no_matched_policy · transition=triggered · fallback_webhook=sent · policies_total=1
+```
+
+- `fallback_webhook=sent` — the AI pipeline declined the alert (usually the alert-AI policy's
+  `severities` exclude it) but the plain webhook went out anyway. Nobody lost anything.
+- **`fallback_webhook=NOT sent` next to `outcome=skipped` is the shape that means nobody was
+  told.** That is the one to escalate.
+
+Two traps in the same area:
+
+- **`_dac_notify_count` in an alert's evidence proves nothing.** It is written before routing
+  is even attempted, so it does not mean delivered — it does not even mean attempted.
+- **Severity is gated by the alert-AI policy, not by config.** A policy whose `severities`
+  omit `medium` means medium alerts get no AI analysis at all. Check `ai/policies` before
+  concluding a rule is broken.
 
 ## "Not alerting" has five possible causes
 

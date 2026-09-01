@@ -48,13 +48,31 @@ ZABBIX_VERIFY_TLS=true
 
 ## Handoff
 
-- External model handoff: `dba-skill/HANDOFF.md`
 - Main skill prompt and workflow: `dba-skill/SKILL.md`
-- DBA API reference: `dba-skill/references/dba_api.md`
+- DBA API semantics and pitfalls: `dba-skill/references/dba_api.md`
+- **Third-party model teams** (no repo access, HTTP only): `docs/external-skill-quickstart.md`
+  in the platform repo — self-contained, and it lives next to the API it describes.
+
+> There is deliberately **no separate handoff file here.** There used to be
+> (`dba-skill/HANDOFF.md`), and it had no audience of its own: agents loading the skill read
+> `SKILL.md`, third parties read the platform repo's quickstart. What it did have was drift —
+> a copy of an API description, one repo away from the API, cannot be updated in the same
+> commit as the change it describes. By the time it was removed it still claimed to target
+> `v2.0.21+` (the platform had shipped 40+ releases since) and listed 13 endpoints out of 84.
+> If a single-file deliverable is needed again, extend the platform repo's quickstart rather
+> than re-creating a second copy here.
 
 ## Compatibility Notes
 
-- This repository targets Database AI Center `v2.0.21+`; the live diagnostic probe drill-down (`probe-catalog` / `probe-run`) requires `v2.19.0+`, and the knowledge-base commands (`kb-search` / `kb-incidents` / `kb-doc-search`) require `v2.32+` (document search `v2.39+`). All of these degrade cleanly on older servers (404/empty) and are optional.
+- This repository targets Database AI Center `v2.0.21+` and degrades cleanly on older servers (404/empty) — every capability below is optional, not required:
+  - live diagnostic probe drill-down (`probe-catalog` / `probe-run`): `v2.19.0+`
+  - knowledge base (`kb-search` / `kb-incidents` / `kb-doc-search`): `v2.32+`, document search `v2.39+`
+  - self-describing read-endpoint catalog (`ai-endpoints`): `v2.47.0+`
+  - unknown query parameters answered with `422` + `accepted_params` instead of being silently dropped: `v3.33.3+` — **below this, verify a filter actually applied before trusting the rows**
+  - fleet-wide metric/health queries and `metric-names`: `v3.38.0+`, vendor metric-name aliasing `v3.39.0+`
+  - staleness measured against `last_sync_at` rather than `now`: `v3.41.0+`
+  - `database_inventory_coverage` on an instance, and `instances_covered_by_cluster_owner` in inventory coverage: `v3.46.0+`
+  - `routing_skip` in `ai/observability`'s audit trail (why a notification was not sent): `v3.47.0+`
 - The former `database-ai-center` skill name is retired in favor of `dba-skill`.
 - The main path no longer depends on legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}`.
 - Diagnostics never accepts free-form SQL: use DBA catalog `check_id` values (`diagnostics-run`) or whitelisted probe names + bound params (`probe-run`) only.
