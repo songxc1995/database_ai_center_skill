@@ -415,7 +415,24 @@ def _request_once(method: str, path: str, *, params: dict[str, Any] | None = Non
             raw = response.read()
             if not raw:
                 return None
-            return json.loads(raw.decode("utf-8"))
+            try:
+                return json.loads(raw.decode("utf-8"))
+            except json.JSONDecodeError as exc:
+                # A 2xx that is not JSON almost always means the request never reached the
+                # API: a base URL missing its /api/v2 prefix lands on the web server, which
+                # answers 200 with an HTML page. "Expecting value: line 1 column 1" describes
+                # the parser's disappointment, not the reader's problem — so say what came
+                # back and where it came from.
+                content_type = response.headers.get("Content-Type") or "unknown"
+                _fail(
+                    "invalid_json",
+                    f"{method} {path} returned HTTP {response.status} with a non-JSON body "
+                    f"(Content-Type: {content_type}). If this is HTML, PROJECT_API_BASE_URL is "
+                    f"probably missing its /api/v2 suffix.",
+                    url=url,
+                    body_preview=_redact(raw.decode("utf-8", errors="replace")[:200]),
+                    detail=str(exc),
+                )
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         global _LAST_HTTP_STATUS
