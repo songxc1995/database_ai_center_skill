@@ -1367,9 +1367,18 @@ def _run() -> int:
 
     stdout is redirected to devnull first so the shutdown flush has somewhere to go; without
     that, the same error is raised again after this handler returns.
+
+    The flush has to happen HERE, not at interpreter shutdown. A table of a few hundred rows
+    fits entirely in stdout's buffer, so every write succeeds, main() returns 0, and nothing
+    is raised inside this try at all — the pipe is only touched when the interpreter drains
+    the buffer on the way out, long after this handler is gone. That is why the first version
+    of this fix looked right, tested green on small outputs, and still printed the traceback
+    for `--all ... | head`: it was guarding a moment the error never happened in.
     """
     try:
-        return main()
+        rc = main()
+        sys.stdout.flush()
+        return rc
     except BrokenPipeError:
         try:
             os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
