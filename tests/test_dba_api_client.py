@@ -648,3 +648,36 @@ def test_global_flags_work_before_and_after_the_subcommand():
     assert parser.parse_args(["--all", "get", "/instances"]).all is True
     assert parser.parse_args(["get", "/instances", "--all"]).all is True
     assert parser.parse_args(["get", "/instances"]).all is False
+
+
+def test_a_closed_pipe_is_not_reported_as_a_failure():
+    """`| head` is the normal way to look at these outputs, and it closes the pipe.
+
+    Python raises again while flushing stdout at shutdown, printing a traceback that reads
+    like the command failed — the rows already written were correct and the truncation was
+    the caller's own choice. Reported from the field 2026-09-02.
+    """
+    import subprocess as _sp
+
+    script = (
+        "import sys, runpy;"
+        f"sys.argv=['x','--help'];"
+        "print('x' * 100000)"
+    )
+    # Drive the real entry point: a huge stdout write into a reader that exits immediately.
+    proc = _sp.Popen(
+        [sys.executable, "-c",
+         "import sys;"
+         "sys.path.insert(0, %r);" % str(CLIENT.parent) +
+         "import importlib.util as u;"
+         "s=u.spec_from_file_location('c', %r);" % str(CLIENT) +
+         "m=u.module_from_spec(s); s.loader.exec_module(m);"
+         "\nimport builtins\n"
+         "m.main=lambda argv=None: (sys.stdout.write('x'*(1<<22)), 0)[1]\n"
+         "raise SystemExit(m._run())"],
+        stdout=_sp.PIPE, stderr=_sp.PIPE,
+    )
+    proc.stdout.close()          # the `head` moment: reader goes away mid-write
+    _, err = proc.communicate()
+    assert b"BrokenPipeError" not in err, err.decode("utf-8", "replace")[:400]
+    assert proc.returncode == 0, "a caller truncating our output is not our failure"

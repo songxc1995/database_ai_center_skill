@@ -1288,5 +1288,26 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def _run() -> int:
+    """Run main, treating a closed pipe as the ordinary end of output.
+
+    `| head` closes the pipe mid-write; Python then raises again while flushing stdout at
+    interpreter shutdown and prints a traceback. The rows already written were correct and
+    the truncation was the caller's own choice, so a traceback here is pure noise that reads
+    like the command failed — and `| head` is the most common way to look at these outputs.
+
+    stdout is redirected to devnull first so the shutdown flush has somewhere to go; without
+    that, the same error is raised again after this handler returns.
+    """
+    try:
+        return main()
+    except BrokenPipeError:
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_run())
