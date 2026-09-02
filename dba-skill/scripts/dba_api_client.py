@@ -299,15 +299,65 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
     return out
 
 
+_MISSING = object()
+
+
+def _dig(row: Any, path: str) -> Any:
+    """Follow a dotted path into a row, or return _MISSING when it does not exist.
+
+    The backup-coverage rows keep nearly everything worth reading inside the ``local`` and
+    ``remote`` objects, so a flat lookup left the caller two bad choices: dump the whole
+    nested blob into a table cell, or ask for ``local.status`` and get a blank column. A blank
+    column is the worse one — it reads as "these instances have no data".
+    """
+    current = row
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
 def _project(payload: Any, fields: list[str] | None) -> Any:
-    """Keep only the requested fields, so a 400 KB dump can be four columns."""
+    """Keep only the requested fields, so a 400 KB dump can be four columns.
+
+    Supports dotted paths (``local.status``). A field that matches nothing on any row is an
+    error rather than an empty column: asking for something that is not there is a mistake in
+    the request, and answering it with blanks makes the mistake look like data.
+    """
     if not fields:
         return payload
     items, meta = _envelope(payload)
     if items is None:
-        return {key: payload.get(key) for key in fields} if isinstance(payload, dict) else payload
+        if not isinstance(payload, dict):
+            return payload
+        picked_one = {key: _dig(payload, key) for key in fields}
+        missing = [k for k, v in picked_one.items() if v is _MISSING]
+        if missing:
+            raise SystemExit(
+                f"--fields: no such field(s): {', '.join(missing)}. "
+                f"Available: {', '.join(sorted(payload)[:20])}"
+            )
+        return picked_one
+    dict_rows = [row for row in items if isinstance(row, dict)]
+    unmatched = [
+        key for key in fields
+        if dict_rows and all(_dig(row, key) is _MISSING for row in dict_rows)
+    ]
+    if unmatched:
+        sample = dict_rows[0]
+        available = sorted(sample)
+        nested = [
+            f"{k}.{sub}" for k, v in sample.items() if isinstance(v, dict) for sub in sorted(v)
+        ]
+        raise SystemExit(
+            f"--fields: no such field(s): {', '.join(unmatched)}. "
+            f"Available: {', '.join(available)}"
+            + (f"; nested: {', '.join(nested[:20])}" if nested else "")
+        )
     picked = [
-        {key: row.get(key) for key in fields} if isinstance(row, dict) else row
+        {key: (None if (v := _dig(row, key)) is _MISSING else v) for key in fields}
+        if isinstance(row, dict) else row
         for row in items
     ]
     if meta.get("shape") == "list":
@@ -545,6 +595,7 @@ def cmd_classification(args: argparse.Namespace) -> Any:
             "type": args.type,
             "topology": args.topology,
             "tenant_id": args.tenant_id,
+            "limit": getattr(args, "limit", None),
         },
     )
 
@@ -1075,6 +1126,7 @@ def build_parser() -> argparse.ArgumentParser:
     alerts.set_defaults(func=cmd_alerts_list)
 
     classification = sub.add_parser("classification")
+    classification.add_argument("--limit", type=int)
     classification.add_argument("--type", choices=["mysql", "postgres", "oracle", "tidb", "clickhouse"])
     classification.add_argument(
         "--topology",
