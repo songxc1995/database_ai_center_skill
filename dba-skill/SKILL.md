@@ -8,6 +8,11 @@ description: Query Database AI Center v2.19+ live DBA APIs for current/active al
 ## Overview
 Use this skill as the primary read-only DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes).
 
+Version numbers written into this document are minimums, not a description of what is deployed —
+they will drift, and chasing them here is how a document starts lying. `get
+/observability/version` is the authoritative answer to "which release am I talking to", and
+`ai-endpoints` / `probe-catalog` to "what can it do".
+
 Prefer the `/api/v2/dba/*` endpoints. Do not use the legacy `/alerts -> /alerts/{id}/ai-detail -> /ai/context/{instance_id}` chain as the main path.
 
 Use the `alerts` helper command (`GET /dba/alerts`, v3.32+) for broad current alert inventory
@@ -247,8 +252,36 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `ai-endpoints` | `GET /ai-endpoints` (the catalogue itself) |
 | `get <path>` | anything else in the catalogue |
 
+**Response shapes.** A collection may arrive under `items`, `instances`, `events`, `probes`,
+`entries`, `results` or `hits`, as a bare list, or as a single object. Guessing wrong is a
+runtime crash (`'str' object has no attribute 'get'`), so branch on what is present rather than
+assuming `items`. Note `probe-catalog` keys its entries by `probe`, not `name` or `id`.
+
 Frequently useful paths that have **no** helper — reach them with `get`:
-`/dba/fleet/metric-names` (metric vocabulary), `/dba/fleet/metrics` (one metric across the fleet), `/dba/fleet/health` (fleet health scores), `/observability/main-chain` and `/observability/self-check` (is the platform itself healthy), `/ai/observability` (is AI analysis succeeding), `/ai/rag/status` (is knowledge retrieval available).
+`/dba/fleet/metric-names` (metric vocabulary), `/dba/fleet/metrics` (one metric across the fleet), `/dba/fleet/health` (fleet health scores), `/observability/main-chain` (is collection→alerting→AI flowing), `/observability/version` (which release is answering — the only way to tell whether this document is stale), `/ai/observability` (is AI analysis succeeding), `/ai/rag/status` (is knowledge retrieval available), `/data-quality` (fleet-wide metric trustworthiness, paged: read `total` and `truncated`), `/clusters` (cluster membership — the direct way to find which primary a standby belongs to), `/ai/diagnosis-quality` (AI diagnosis accuracy), `/reports/inspection` (inspection reports), `/cloud-rds/downsizing-plans` (plans already acted on, not just candidates), `/alert-silences` and `/log-alert-rules` (silences and log-alert rules).
+
+### "Does this instance have a backup?" has three vocabularies
+
+Three endpoints answer versions of that question in three different shapes, and reading only
+one of them is how a confident wrong answer gets produced.
+
+| Field | Endpoint | Shape | What it actually means |
+|---|---|---|---|
+| `has_backup_run_records` | `classification` | bool | Only: does a backup **run record** exist. RMAN cannot see an expdp dump, so an instance declared `expdp` is `false` here while being backed up nightly. Never read this as "has a backup". |
+| `determination` | `backups` | 4 states | The per-instance evidence verdict: `verified` / `declared_no_evidence` / `not_tracked` / `unknown`. This is the one that answers the question for a single instance. |
+| `verdict` | `backups-coverage` | 8 states | The fleet-level judgement, which also folds in the offsite track and cluster coverage. `underlying_verdict` shows what the evidence said before suppression. |
+
+Rule of thumb: **one instance → `determination`; the fleet → `verdict`; never `has_backup_run_records`.**
+
+### `verdict` is a computed judgement, and it changes
+
+The same query five hours apart returned different verdicts for instances 97, 59 and 69 — the
+data had not changed, the judging logic had. That is normal (each change fixed a real
+misreading), but it means a verdict is only true as of the `generated_at` in the same response.
+
+Carry `generated_at` with any conclusion built on one, and re-run rather than reusing an
+earlier answer. The same applies to `counts`: they describe the whole matched set, while
+`items` is one page — check `truncated` before treating a list as complete.
 
 ### Is the platform itself telling the truth?
 

@@ -541,6 +541,23 @@ def cmd_alerts(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_self_check(args: argparse.Namespace) -> Any:
+    """Ask the platform whether it is currently contradicting itself.
+
+    37 cross-subsystem invariants, each carrying the incident that motivated it. Worth running
+    before reporting that anything is absent: "no alerts", "no backups", "no metrics" and "the
+    platform cannot currently tell" are different answers, and only this endpoint distinguishes
+    them. A violating check names the rows it caught, so it doubles as a lead.
+    """
+    payload = _request("GET", "/observability/self-check")
+    if not getattr(args, "violations_only", False) or not isinstance(payload, dict):
+        return payload
+    return {
+        **{k: v for k, v in payload.items() if k != "results"},
+        "results": [r for r in (payload.get("results") or []) if r.get("violations")],
+    }
+
+
 def cmd_backups_coverage(args: argparse.Namespace) -> Any:
     """Fleet backup coverage across BOTH tracks (local RMAN/expdp + offsite NAS).
 
@@ -553,7 +570,14 @@ def cmd_backups_coverage(args: argparse.Namespace) -> Any:
     return _request(
         "GET",
         "/dba/backups/coverage",
-        params={"verdict": verdict, "instance_type": args.instance_type, "limit": args.limit},
+        params={
+            "verdict": verdict,
+            "instance_type": args.instance_type,
+            "exclude_cloud": "true" if getattr(args, "exclude_cloud", False) else None,
+            "cloud_vendor": getattr(args, "cloud_vendor", None),
+            "environment": getattr(args, "environment", None),
+            "limit": args.limit,
+        },
     )
 
 
@@ -1110,8 +1134,20 @@ def build_parser() -> argparse.ArgumentParser:
                       choices=["at_risk", "ok", "warning", "indeterminate",
                                "remote_untracked", "not_applicable", "suppressed", "all"])
     bcov.add_argument("--instance-type")
+    bcov.add_argument("--exclude-cloud", action="store_true",
+                      help="Drop vendor-managed cloud RDS rows (their backups are the provider's).")
+    bcov.add_argument("--cloud-vendor")
+    bcov.add_argument("--environment")
     bcov.add_argument("--limit", type=_positive_int, default=500)
     bcov.set_defaults(func=cmd_backups_coverage)
+
+    selfchk = sub.add_parser(
+        "self-check",
+        help="Platform cross-subsystem invariants — run before reporting anything as absent",
+    )
+    selfchk.add_argument("--violations-only", action="store_true",
+                         help="Return only the checks that are currently violated.")
+    selfchk.set_defaults(func=cmd_self_check)
 
     capf = sub.add_parser(
         "capacity-forecast",
