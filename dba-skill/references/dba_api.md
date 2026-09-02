@@ -20,6 +20,93 @@ schema.
 
 ---
 
+## A page is not the answer
+
+Collections come back paginated and **a partial page is shaped exactly like a complete one**.
+Production 2026-09-01: a caller asked which instances had no databases, received 2000 of 2072
+rows, and both instances it was looking for were among the missing 72 — the JSON gave no hint
+until someone read `total`.
+
+The client now warns on stderr whenever a page is partial, and `--all` follows the pagination
+to the end. Use `--all` for any question of the form "which ones", and treat a bare page as
+provisional.
+
+## There is no single response envelope
+
+Four shapes, and guessing wrong is how a run dies on `'str' object has no attribute 'get'`:
+
+| endpoint | shape |
+|---|---|
+| `ai-endpoints`, `metrics/{id}/latest` | bare JSON **list** |
+| `instances`, `instances/database-inventory`, `databases` | `{items, total, limit, offset, truncated}` |
+| `alerts` | `{items, total, page, page_size, has_next}` — a different pagination vocabulary |
+| `elk/coverage` | `{configured, available, summary, instances:[…]}` — rows under `instances`, each with its own `covered` flag |
+| single-object reads (`backups`, `instances/{id}`) | a plain object, **not** a collection |
+
+`--fields id,host,type,status` and `--format table` work across all of them, and cut a
+400 KB inventory dump to the four columns actually being asked about.
+
+## Timestamps are UTC; local logs are not
+
+Every API timestamp — `started_at`, `last_sync_at`, `triggered_at`, `generated_at` — is
+**UTC**. RMAN output and OS log lines carry the host's local time, which on this fleet is
+**UTC+8**. That difference decides whether two records are the same event: a backup job at
+`2026-08-24T16:10Z` and an error logged `08/25/2026 00:39:11` are 90 minutes apart on the same
+night, not different days. Convert before concluding anything about ordering.
+
+## `determination` is a historical verdict, not a current one
+
+`determination: verified` answers **"did a backup ever succeed?"** and says nothing about
+whether the situation is healthy now. Production has shown `determination=verified` alongside
+`summary.status=warning`, an RPO of 30.6h and `latest_restore_point_at` two days old — all
+consistent, because they answer different questions.
+
+For "is this fine right now", read:
+
+- `recovery.latest_restore_point_at` — how far back you could actually restore to.
+- `sync_age_seconds` / `sync_stale` (platform v3.49+) — **how old the snapshot itself is.**
+  A frozen pull once sat at `determination=verified` with `last_error: null` for 25h; "this
+  instance's backups are broken" and "the platform has not fetched anything" call for
+  opposite responses. `sync_stale: null` means never synced, which is a third thing again.
+
+## `probe-catalog` says what is *supported*, not what *works right now*
+
+`supported: true` is a static capability claim for the engine, checked at catalog build time.
+The probe can still return `available: false` — on Oracle, `tablespace_usage` and
+`connection_pool` succeed on one instance and time out against the proxy on another in the
+same RAC cluster, minute to minute.
+
+So: **read `available` and `note` from the run, not `supported` from the catalog.** The
+platform does say why (`note` carries e.g. `Oracle proxy diagnostics failed: … i/o timeout`)
+— it is not silent, but the catalog alone will mislead you.
+
+## What an `ai-client` key may POST
+
+Everything else is read-only. Exactly three write endpoints accept `ai-client`:
+
+```text
+POST /dba/instances/{id}/diagnostics/run     # catalog check_ids
+POST /instances/{id}/diagnostics/probe       # allowlisted probe names
+POST /instances/{id}/prometheus/query        # read-only PromQL
+```
+
+`diagnostics-run` **is** available to `ai-client`. A 403 on it means the key in use is not an
+`ai-client` key (a `viewer` key produces exactly this), not that the endpoint is closed —
+check the key before concluding the surface is smaller than it is.
+
+## Searching database logs: use the engine's words, not the tool's
+
+`elk-search` matches log text, so the keyword has to be a string the engine actually writes.
+Oracle's alert log never contains the word `RMAN` — searching for it returns 0 hits on an
+instance whose backups are failing loudly. Use what the log says:
+
+- **Oracle**: `ORA-`, `Errors in file`, `ALTER SYSTEM ARCHIVE LOG`, `Media Recovery`
+- **MySQL**: `[ERROR]`, `Aborted connection`, `deadlock`
+- **PostgreSQL**: `FATAL`, `ERROR:`, `canceling statement`, `checkpoint`
+
+Narrow with `--levels ERROR,FATAL` and a window around the incident rather than with a tool
+name.
+
 ## Never guess a query parameter name
 
 Since platform v3.33.3 an unknown query parameter returns **422** with both `unknown_params`

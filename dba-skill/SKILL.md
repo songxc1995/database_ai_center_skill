@@ -20,6 +20,27 @@ Use `zabbix-readonly` only as supporting host evidence when Database AI Center d
 
 ## Reading the data honestly (v3.32+)
 
+**A page is not the answer.** Collections are paginated and a partial page looks exactly like
+a complete one. Pass `--all` for any "which ones" question; the client also warns on stderr
+when a page is partial. Prod: 2000 of 2072 rows returned, and the two instances being looked
+for were in the missing 72.
+
+**Timestamps are UTC. Host logs are UTC+8.** Convert before deciding two records are the same
+event.
+
+**`determination` is historical.** `verified` means a backup once succeeded — for "is it fine
+now" read `recovery.latest_restore_point_at` and `sync_stale` / `sync_age_seconds`.
+
+**`supported` in `probe-catalog` is not `available`.** Read `available` + `note` from the run.
+
+**`--fields a,b,c` and `--format table`** cut a several-hundred-KB dump to the columns asked
+about.
+
+**One IP, one call:** `instance --ip <ip>` returns detail, freshness, backups, database
+count/coverage and active alerts together. `onboarding-check --instance-id N` answers whether
+a newly onboarded instance is actually wired up (databases, backup method, ownership, ELK).
+
+
 These are the places where a confident-sounding answer is most likely to be wrong. Read them
 before summarising anything.
 

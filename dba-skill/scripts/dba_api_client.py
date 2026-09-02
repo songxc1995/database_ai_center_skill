@@ -32,7 +32,30 @@ def _unquote_env_value(value: str) -> str:
     return value
 
 
+# Where the credentials came from, so an auth failure can say so instead of looking like a
+# revoked key. Filled by _load_env_files.
+_ENV_PROVENANCE: dict[str, Any] = {"source": None, "searched": [], "keys": []}
+
+
+def _credential_provenance() -> dict[str, Any]:
+    source = _ENV_PROVENANCE.get("source")
+    return {
+        "credential_source": source or "inherited process environment (no .env file found)",
+        "env_files_searched": _ENV_PROVENANCE.get("searched") or [],
+        "cwd": os.getcwd(),
+    }
+
+
 def _load_env_files() -> None:
+    """Load the nearest .env, and remember whether one was found.
+
+    Provenance is the point. The documented production setup supplies the key through the
+    process environment (the agent runtime's own config), so *failing* when no .env is found
+    would break the normal case. But the silent version is worse than either: run from the
+    wrong directory and the stale inherited key is used without a word, so a 401 reads as
+    "the key was revoked" when it actually means "you are in the wrong directory". The fix is
+    not to refuse — it is to make every auth failure say where its credential came from.
+    """
     global _ENV_FILES_LOADED
     if _ENV_FILES_LOADED:
         return
@@ -41,7 +64,9 @@ def _load_env_files() -> None:
     try:
         search_roots = (Path.cwd().resolve(), *Path.cwd().resolve().parents)
     except OSError:
+        _ENV_PROVENANCE["searched"] = ["<cwd unavailable>"]
         return
+    _ENV_PROVENANCE["searched"] = [str(d) for d in search_roots]
 
     for directory in search_roots:
         for filename in ENV_FILE_NAMES:
@@ -59,6 +84,8 @@ def _load_env_files() -> None:
                 if separator != "=" or key not in ENV_ALLOWLIST:
                     continue
                 os.environ[key] = _unquote_env_value(value)
+                _ENV_PROVENANCE.setdefault("keys", []).append(key)
+            _ENV_PROVENANCE["source"] = str(path)
             return
 
 
@@ -152,7 +179,171 @@ def _positive_int(raw: str) -> int:
     return value
 
 
+# Set from --all. A partial page and a complete one look identical, so opting into the whole
+# answer has to be one flag, not a paging loop the caller has to write correctly every time.
+_FETCH_ALL = False
+
+# Last HTTP status seen, so the /dba prefix retry fires only for a genuine 404. A 401 is not
+# a path problem: retrying it just emits a second identical failure and buries the first.
+_LAST_HTTP_STATUS: int | None = None
+
+
 def _request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
+    """Every call goes through here: pages when asked, and always says when a page is partial."""
+    if method == "GET" and _FETCH_ALL:
+        return _fetch_all(method, path, dict(params or {}))
+    payload = _request_once(method, path, params=params, body=body)
+    if method == "GET":
+        _warn_if_truncated(payload, path)
+    return payload
+
+
+def _envelope(payload: Any) -> tuple[list[Any] | None, dict[str, Any]]:
+    """Split a response into (items, meta) across the three shapes the platform returns.
+
+    There is no single envelope: `ai-endpoints` and `metrics/{id}/latest` return a bare list;
+    `instances` and `instances/database-inventory` return
+    {items, total, limit, offset, truncated}; `alerts` returns
+    {items, total, page, page_size, has_next} — a different pagination vocabulary again.
+    Every consumer otherwise has to probe defensively, and guessing wrong turns into
+    'str' object has no attribute 'get' at the worst moment.
+
+    Returns (None, {}) for a single object, which is not a collection and must not be
+    silently treated as one.
+    """
+    if isinstance(payload, list):
+        return payload, {"shape": "list", "total": len(payload)}
+    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
+        meta = {key: value for key, value in payload.items() if key != "items"}
+        meta["shape"] = "envelope"
+        return payload["items"], meta
+    return None, {}
+
+
+def _warn_if_truncated(payload: Any, path: str) -> None:
+    """Say so on stderr when a page is not the whole answer.
+
+    A truncated page and a complete one are the same shape, so "no rows matched" and "your
+    row is on page 2" are indistinguishable without reading `total`. Production 2026-09-01: a
+    caller asked which instances had no databases, got 2000 of 2072 rows, and the two
+    instances it was looking for were in the missing 72.
+    """
+    if not isinstance(payload, dict):
+        return
+    items, meta = _envelope(payload)
+    if items is None:
+        return
+    total = meta.get("total")
+    if meta.get("truncated") is True or (isinstance(total, int) and total > len(items)):
+        sys.stderr.write(
+            json.dumps(
+                {
+                    "warning": "partial_result",
+                    "message": (
+                        f"{path} returned {len(items)} of {total} rows. This page is NOT the "
+                        f"whole answer — re-run with --all, or page with offset/page."
+                    ),
+                    "returned": len(items),
+                    "total": total,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+
+
+def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: int = 50) -> Any:
+    """Follow pagination to the end, for both vocabularies the platform uses.
+
+    ``page_limit`` is a guard, not a preference: an endpoint that never advances would
+    otherwise loop forever, and a silent infinite loop is worse than a partial answer that
+    says it is partial.
+    """
+    first = _request_once(method, path, params=dict(params))
+    items, meta = _envelope(first)
+    if items is None or meta.get("shape") != "envelope":
+        return first
+
+    collected = list(items)
+    total = meta.get("total")
+    if not isinstance(total, int):
+        return first
+
+    if "offset" in meta or "limit" in meta:
+        size = int(meta.get("limit") or len(items) or 1)
+        pages = 0
+        while len(collected) < total and pages < page_limit and size > 0:
+            pages += 1
+            nxt = _request_once(method, path, params={**params, "limit": size, "offset": len(collected)})
+            more, _ = _envelope(nxt)
+            if not more:
+                break
+            collected.extend(more)
+    elif "page" in meta or "page_size" in meta:
+        size = int(meta.get("page_size") or len(items) or 1)
+        page = int(meta.get("page") or 1)
+        pages = 0
+        while len(collected) < total and pages < page_limit and size > 0:
+            pages += 1
+            page += 1
+            nxt = _request_once(method, path, params={**params, "page": page, "page_size": size})
+            more, _ = _envelope(nxt)
+            if not more:
+                break
+            collected.extend(more)
+
+    out = {key: value for key, value in first.items() if key != "items"}
+    out["items"] = collected
+    out["truncated"] = len(collected) < total
+    out["fetched_all"] = len(collected) >= total
+    return out
+
+
+def _project(payload: Any, fields: list[str] | None) -> Any:
+    """Keep only the requested fields, so a 400 KB dump can be four columns."""
+    if not fields:
+        return payload
+    items, meta = _envelope(payload)
+    if items is None:
+        return {key: payload.get(key) for key in fields} if isinstance(payload, dict) else payload
+    picked = [
+        {key: row.get(key) for key in fields} if isinstance(row, dict) else row
+        for row in items
+    ]
+    if meta.get("shape") == "list":
+        return picked
+    out = {key: value for key, value in payload.items() if key != "items"}
+    out["items"] = picked
+    return out
+
+
+def _print_table(payload: Any) -> bool:
+    """Render a collection as columns. Returns False when the payload is not tabular."""
+    items, _ = _envelope(payload)
+    if not items or not all(isinstance(row, dict) for row in items):
+        return False
+    columns: list[str] = []
+    for row in items:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    widths = {c: max(len(c), *(len(_cell(r.get(c))) for r in items)) for c in columns}
+    sys.stdout.write("  ".join(c.ljust(widths[c]) for c in columns).rstrip() + "\n")
+    sys.stdout.write("  ".join("-" * widths[c] for c in columns) + "\n")
+    for row in items:
+        sys.stdout.write("  ".join(_cell(row.get(c)).ljust(widths[c]) for c in columns).rstrip() + "\n")
+    return True
+
+
+def _cell(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)[:60]
+    return str(value)
+
+
+def _request_once(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
     base = _base_url()
     token = _api_key()
     query = urllib.parse.urlencode(_clean_params(params or {}))
@@ -177,11 +368,16 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None, bo
             return json.loads(raw.decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
+        global _LAST_HTTP_STATUS
+        _LAST_HTTP_STATUS = exc.code
+        extra: dict[str, Any] = {"status_code": exc.code, "response": _redact(raw)}
+        if exc.code in (401, 403):
+            # "Wrong key" and "wrong directory" produce the same 401. Say which one this is.
+            extra["credentials"] = _credential_provenance()
         _fail(
             "http_error",
             f"{method} {path} returned HTTP {exc.code}",
-            status_code=exc.code,
-            response=_redact(raw),
+            **extra,
         )
     except urllib.error.URLError as exc:
         _fail("network_error", f"{method} {path} failed: {exc.reason}")
@@ -460,6 +656,124 @@ def cmd_ai_endpoints(args: argparse.Namespace) -> Any:
     return _request("GET", "/ai-endpoints")
 
 
+def _try_get(path: str, params: dict[str, Any] | None = None) -> Any:
+    """GET that returns an error dict instead of exiting, for the composite commands.
+
+    A composite answer must not vanish because one of its parts is unavailable — that is the
+    difference between "this instance has no backup row" and "the whole question failed".
+    """
+    try:
+        return _request_once("GET", path, params=params)
+    except SystemExit:
+        return {"unavailable": True, "path": path, "status_code": _LAST_HTTP_STATUS}
+
+
+def cmd_instance(args: argparse.Namespace) -> Any:
+    """Everything about one instance, from an id or an IP, in one call.
+
+    "Here is an IP, tell me about this box" is the most frequent question and it used to take
+    several calls across two path prefixes. Each part is fetched independently and a missing
+    part is reported as `unavailable` rather than collapsing the whole answer.
+    """
+    instance_id = args.instance_id
+    resolved: Any = None
+    if instance_id is None:
+        if not (args.ip or args.host):
+            _fail("invalid_argument", "instance requires --instance-id, --ip or --host", exit_code=2)
+        resolved = _try_get("/dba/resolve", _clean_params({"ip": args.ip, "host": args.host}))
+        for key in ("instances", "matches", "items"):
+            rows = resolved.get(key) if isinstance(resolved, dict) else None
+            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+                instance_id = rows[0].get("instance_id") or rows[0].get("id")
+                break
+        if instance_id is None:
+            _fail("not_found", f"no instance matched ip={args.ip} host={args.host}",
+                  exit_code=1, resolve_response=resolved)
+
+    detail = _try_get(f"/instances/{instance_id}")
+    databases = _try_get("/databases", {"instance_id": instance_id, "limit": 1})
+    alerts = _try_get("/alerts", {"instance_id": instance_id, "status": "active", "page_size": 50})
+    alert_items, _ = _envelope(alerts)
+    db_items, db_meta = _envelope(databases)
+    return {
+        "instance_id": instance_id,
+        "instance": detail,
+        "freshness": _try_get(f"/dba/instances/{instance_id}/freshness"),
+        "backups": _try_get(f"/instances/{instance_id}/backups"),
+        "database_count": db_meta.get("total") if db_meta else (len(db_items) if db_items else None),
+        "database_inventory_coverage": (detail or {}).get("database_inventory_coverage")
+        if isinstance(detail, dict) else None,
+        "active_alerts": alert_items or [],
+        "resolved_from": {"ip": args.ip, "host": args.host} if resolved is not None else None,
+    }
+
+
+# What a newly onboarded instance is usually missing. Each is a separate subsystem, so
+# "metrics look fine" says nothing about any of them.
+_ONBOARDING_CHECKS = ("database_inventory", "backup_method", "ownership", "elk_logs")
+
+
+def cmd_onboarding_check(args: argparse.Namespace) -> Any:
+    """Is this newly onboarded instance actually wired up?
+
+    Metrics start flowing immediately, which is exactly what makes the rest easy to miss:
+    databases undiscovered, backup method undeclared, no owner, not shipping logs. Four
+    subsystems, four separate answers — this asks all four and says which are missing.
+    """
+    iid = args.instance_id
+    detail = _try_get(f"/instances/{iid}")
+    databases = _try_get("/databases", {"instance_id": iid, "limit": 1})
+    backups = _try_get(f"/instances/{iid}/backups")
+    elk = _try_get("/elk/coverage")
+
+    db_items, db_meta = _envelope(databases)
+    db_count = db_meta.get("total") if db_meta else (len(db_items) if db_items else 0)
+    coverage = (detail or {}).get("database_inventory_coverage") if isinstance(detail, dict) else None
+    method = (backups or {}).get("backup_method") if isinstance(backups, dict) else None
+    contact = (detail or {}).get("contact_person") if isinstance(detail, dict) else None
+    host = (detail or {}).get("host") if isinstance(detail, dict) else None
+
+    # /elk/coverage is a fourth shape again: the rows live under `instances`, each carrying
+    # its own `covered` flag. Matching on `items` + host returned an empty set and reported
+    # every instance as "not shipping logs" — a wrong-field lookup and a genuine gap produce
+    # the same empty answer, which is the whole reason this command reports `unavailable`
+    # separately from `ok: false`.
+    elk_rows = elk.get("instances") if isinstance(elk, dict) else None
+    elk_covered: set[int] = {
+        int(row["id"]) for row in (elk_rows or [])
+        if isinstance(row, dict) and row.get("covered") and row.get("id") is not None
+    }
+    elk_readable = isinstance(elk_rows, list)
+
+    findings = {
+        # An empty list on a cluster member is correct: the owner holds the rows.
+        "database_inventory": {
+            "ok": bool(db_count) or coverage in ("cluster_covered", "cluster_component"),
+            "databases": db_count, "coverage": coverage,
+        },
+        "backup_method": {"ok": bool(method), "backup_method": method,
+                          "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"},
+        "ownership": {"ok": bool(contact), "contact_person": contact},
+        # Unreadable coverage is not the same as uncovered: say which one it is.
+        "elk_logs": (
+            {"ok": int(iid) in elk_covered, "host": host}
+            if elk_readable
+            else {"ok": None, "host": host, "unavailable": "could not read /elk/coverage"}
+        ),
+    }
+    missing = [name for name, f in findings.items() if f["ok"] is False]
+    unknown = [name for name, f in findings.items() if f["ok"] is None]
+    return {
+        "instance_id": iid,
+        "checks": findings,
+        "missing": missing,
+        # A check the platform could not answer is reported apart from one it answered "no":
+        # collapsing them would let an outage read as a clean bill of health.
+        "unknown": unknown,
+        "ok": not missing and not unknown,
+    }
+
+
 def _normalize_read_path(raw: str) -> str:
     """Normalize a catalog path onto the base URL, which already ends in /api/v<n>.
     The ai-endpoints catalog returns full paths like /api/v2/topology, so strip a
@@ -474,6 +788,13 @@ def _normalize_read_path(raw: str) -> str:
     return path
 
 
+def _split_fields(raw: str | None) -> list[str] | None:
+    if not raw:
+        return None
+    fields = [part.strip() for part in raw.split(",") if part.strip()]
+    return fields or None
+
+
 def _parse_kv_params(raw_params: list[str] | None) -> dict[str, str]:
     params: dict[str, str] = {}
     for item in raw_params or []:
@@ -485,8 +806,35 @@ def _parse_kv_params(raw_params: list[str] | None) -> dict[str, str]:
 
 
 def cmd_get(args: argparse.Namespace) -> Any:
+    """Read any catalogue path, tolerating the /dba prefix being present or absent.
+
+    The catalogue mixes both: freshness lives under /dba/instances/{id}/freshness while the
+    instance detail is the bare /instances/{id}. Getting it wrong returns a 404 that reads
+    like "this instance does not exist" rather than "you used the wrong prefix", so the
+    alternative is tried once before reporting failure.
+    """
     path = _normalize_read_path(args.path)
-    return _request("GET", path, params=_parse_kv_params(args.param))
+    params = _parse_kv_params(args.param)
+    try:
+        return _request("GET", path, params=params)
+    except SystemExit:
+        if _LAST_HTTP_STATUS != 404:
+            raise
+        alternative = path[len("/dba"):] if path.startswith("/dba/") else "/dba" + path
+        if alternative == path:
+            raise
+        try:
+            payload = _request("GET", alternative, params=params)
+        except SystemExit:
+            raise SystemExit(1) from None
+        sys.stderr.write(
+            json.dumps(
+                {"warning": "path_prefix_corrected", "requested": path, "used": alternative},
+                ensure_ascii=False,
+            )
+            + "\n"
+        )
+        return payload
 
 
 def cmd_probe_run(args: argparse.Namespace) -> Any:
@@ -602,9 +950,55 @@ def cmd_backups(args: argparse.Namespace) -> Any:
     )
 
 
+def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
+    """Register the output flags.
+
+    ``suppress_defaults`` matters on the subparser copies: argparse applies a subparser's
+    defaults *after* the top-level namespace, so a plain default would overwrite a flag the
+    caller passed before the subcommand — `--all get ...` would be accepted and silently do
+    nothing. SUPPRESS makes the subparser contribute the value only when it was actually
+    given, so both orders work.
+    """
+    default: Any = argparse.SUPPRESS if suppress_defaults else None
+    parser.add_argument(
+        "--all", action="store_true", default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="Follow pagination to the end. Without it a large collection returns one page, "
+             "and a partial page is shaped exactly like a complete one.",
+    )
+    parser.add_argument(
+        "--fields", default=default,
+        help="Comma-separated fields to keep from each row (e.g. id,host,type,status). "
+             "A full inventory dump is hundreds of KB; four columns is usually the answer.",
+    )
+    parser.add_argument(
+        "--format", choices=["json", "table"],
+        default=(argparse.SUPPRESS if suppress_defaults else "json"),
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
+    _add_global_output_flags(parser)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    instance = sub.add_parser(
+        "instance",
+        help="Everything about one instance from an id or an IP: detail, freshness, backups, "
+             "database count/coverage, and active alerts — in one call.",
+    )
+    instance.add_argument("--instance-id", type=int)
+    instance.add_argument("--ip")
+    instance.add_argument("--host")
+    instance.set_defaults(func=cmd_instance)
+
+    onboarding = sub.add_parser(
+        "onboarding-check",
+        help="Is a newly onboarded instance actually wired up? Checks database inventory, "
+             "declared backup method, ownership and ELK log coverage — metrics flowing says "
+             "nothing about any of them.",
+    )
+    onboarding.add_argument("--instance-id", type=int, required=True)
+    onboarding.set_defaults(func=cmd_onboarding_check)
 
     resolve = sub.add_parser("resolve")
     _common_filters(resolve)
@@ -874,13 +1268,22 @@ def build_parser() -> argparse.ArgumentParser:
     )
     backups.set_defaults(func=cmd_backups)
 
+    # Accept the flags after the subcommand too — `inventory-summary --all` is what anyone
+    # types first, and argparse would otherwise only honour them before the subcommand.
+    for action in sub.choices.values():
+        _add_global_output_flags(action, suppress_defaults=True)
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    global _FETCH_ALL
+    _FETCH_ALL = bool(getattr(args, "all", False))
     payload = args.func(args)
+    payload = _project(payload, _split_fields(getattr(args, "fields", None)))
+    if getattr(args, "format", "json") == "table" and _print_table(payload):
+        return 0
     _print_json(payload)
     return 0
 

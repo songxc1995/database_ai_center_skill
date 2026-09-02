@@ -522,3 +522,129 @@ class DbaApiClientTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --- Field-report fixes (2026-09-02) ------------------------------------------------------
+#
+# The suite above drives the client as a subprocess against a fake server, which is right for
+# end-to-end behaviour. These load it as a module to test the helpers directly.
+import importlib.util as _importlib_util
+
+_spec = _importlib_util.spec_from_file_location("dba_api_client", CLIENT)
+client_module = _importlib_util.module_from_spec(_spec)
+_spec.loader.exec_module(client_module)
+
+
+def test_envelope_handles_all_three_platform_shapes():
+    """There is no single envelope, and guessing wrong is how a caller gets 'str' has no 'get'."""
+    _envelope = client_module._envelope
+
+    items, meta = _envelope([1, 2, 3])
+    assert items == [1, 2, 3] and meta["shape"] == "list"
+
+    items, meta = _envelope({"items": [1], "total": 9, "limit": 1, "offset": 0, "truncated": True})
+    assert items == [1] and meta["total"] == 9 and meta["truncated"] is True
+
+    items, meta = _envelope({"items": [1], "total": 9, "page": 1, "page_size": 1, "has_next": True})
+    assert items == [1] and meta["page_size"] == 1
+
+    # A single object is not a collection and must not be treated as one.
+    assert _envelope({"instance_id": 7, "determination": "verified"}) == (None, {})
+
+
+def test_truncated_page_warns_on_stderr(capsys):
+    """A partial page is shaped exactly like a complete one.
+
+    Production 2026-09-01: a caller asked which instances had no databases, got 2000 of 2072
+    rows, and the two it was looking for were among the missing 72.
+    """
+    import json as _json
+
+    _warn_if_truncated = client_module._warn_if_truncated
+
+    _warn_if_truncated({"items": [1, 2], "total": 2072, "truncated": True}, "/instances")
+    err = capsys.readouterr().err
+    payload = _json.loads(err)
+    assert payload["warning"] == "partial_result"
+    assert payload["total"] == 2072 and payload["returned"] == 2
+
+
+def test_a_complete_page_is_silent(capsys):
+    _warn_if_truncated = client_module._warn_if_truncated
+
+    _warn_if_truncated({"items": [1, 2], "total": 2, "truncated": False}, "/instances")
+    assert capsys.readouterr().err == ""
+
+
+def test_auth_failure_reports_where_the_credential_came_from():
+    """A stale inherited key and a revoked key both return 401.
+
+    Running from the wrong directory produced AUTH_INVALID_API_KEY, which reads as "the key
+    was revoked" when it means "there is no .env here". Refusing to run would break the
+    documented setup (the runtime supplies the key through the environment), so the fix is
+    provenance, not refusal.
+    """
+    _credential_provenance = client_module._credential_provenance
+
+    prov = _credential_provenance()
+    assert "credential_source" in prov
+    assert "cwd" in prov
+    assert isinstance(prov["env_files_searched"], list)
+
+
+def test_projection_keeps_only_requested_fields():
+    _project = client_module._project
+
+    payload = {"items": [{"id": 1, "host": "a", "junk": "x"}], "total": 1}
+    out = _project(payload, ["id", "host"])
+    assert out["items"] == [{"id": 1, "host": "a"}]
+    assert out["total"] == 1, "envelope metadata must survive projection"
+
+
+def test_onboarding_check_separates_unreadable_from_uncovered(monkeypatch):
+    """★ The bug this test exists for was written twice in one day.
+
+    /elk/coverage puts its rows under `instances`, not `items`, each with its own `covered`
+    flag. Reading it as `items` produced an empty set and reported every instance as "not
+    shipping logs" — a wrong-field lookup and a real gap return the same empty answer. So an
+    unreadable check must report `ok: None`, never `ok: False`.
+    """
+    import argparse
+
+    client = client_module
+
+    def fake_get(path, params=None):
+        if path == "/elk/coverage":
+            return {"configured": True, "instances": [{"id": 5, "covered": True}]}
+        if path == "/instances/5":
+            return {"id": 5, "host": "10.0.0.5", "contact_person": "someone",
+                    "database_inventory_coverage": "owns"}
+        if path == "/databases":
+            return {"items": [{"id": 1}], "total": 1}
+        if path == "/instances/5/backups":
+            return {"backup_method": "rman"}
+        return {}
+
+    monkeypatch.setattr(client, "_try_get", fake_get)
+    out = client.cmd_onboarding_check(argparse.Namespace(instance_id=5))
+    assert out["checks"]["elk_logs"]["ok"] is True
+    assert out["ok"] is True
+
+    def broken_elk(path, params=None):
+        return {"unavailable": True} if path == "/elk/coverage" else fake_get(path, params)
+
+    monkeypatch.setattr(client, "_try_get", broken_elk)
+    out = client.cmd_onboarding_check(argparse.Namespace(instance_id=5))
+    assert out["checks"]["elk_logs"]["ok"] is None, "unreadable must not read as uncovered"
+    assert out["unknown"] == ["elk_logs"]
+    assert out["ok"] is False, "an unanswerable check is not a clean bill of health"
+
+
+def test_global_flags_work_before_and_after_the_subcommand():
+    """argparse applies subparser defaults last, so a plain default silently ate `--all`."""
+    build_parser = client_module.build_parser
+
+    parser = build_parser()
+    assert parser.parse_args(["--all", "get", "/instances"]).all is True
+    assert parser.parse_args(["get", "/instances", "--all"]).all is True
+    assert parser.parse_args(["get", "/instances"]).all is False
