@@ -23,6 +23,10 @@ usage: install.sh [--host claude|workbuddy|<path>]... [--copy]
   --copy   Copy instead of symlinking. Symlinks are the default so one `git pull` updates
            every host at once; copies drift, and a drifted copy of a prompt is worse than no
            copy at all.
+
+A symlink install points every host at THIS checkout, so keep the repository somewhere
+permanent — a clone under /tmp or a scratch directory takes all hosts down with it when it is
+cleaned up. Use --copy if the source cannot be kept around.
 USAGE
 }
 
@@ -53,11 +57,27 @@ fi
 
 # ── 1. credentials ────────────────────────────────────────────────────────────
 if [ ! -f "$CONFIG" ]; then
+  # Bail with an explanation before prompting, not during. Under `set -e` a `read` that hits
+  # EOF exits the script on that line, so a run from a pipe or a deployment tool produced
+  # exit 1 with an empty stderr and half a sentence on stdout — the reader is left to guess.
+  if [ ! -t 0 ]; then
+    cat >&2 <<EOF
+No $CONFIG, and stdin is not a terminal, so there is nothing to prompt.
+Create it first (chmod 600), then re-run:
+
+  PROJECT_API_BASE_URL=http://databaseai.fosun.com/api/v2
+  PROJECT_API_KEY=<your key>
+
+Or run this script from a terminal.
+EOF
+    exit 1
+  fi
   echo "No $CONFIG yet — creating it."
-  read -r -p "  API base URL [http://databaseai.fosun.com/api/v2]: " base
+  read -r -p "  API base URL [http://databaseai.fosun.com/api/v2]: " base || true
   base="${base:-http://databaseai.fosun.com/api/v2}"
-  read -r -s -p "  Your personal API key (input hidden): " key; echo
-  [ -n "$key" ] || { echo "  no key given, aborting" >&2; exit 1; }
+  read -r -s -p "  Your personal API key (input hidden): " key || true
+  echo
+  [ -n "${key:-}" ] || { echo "  no key given, aborting" >&2; exit 1; }
   mkdir -p "$(dirname "$CONFIG")"
   umask 177
   printf 'PROJECT_API_BASE_URL=%s\nPROJECT_API_KEY=%s\n' "$base" "$key" > "$CONFIG"

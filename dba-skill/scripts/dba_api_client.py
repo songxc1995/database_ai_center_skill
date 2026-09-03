@@ -320,6 +320,10 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
     """
     if not isinstance(payload, dict):
         return
+    if _COUNT_ONLY:
+        # The caller asked for the counts and is getting them in full. Telling them the rows
+        # are incomplete — and to fetch more rows — argues against what they just requested.
+        return
     items, meta = _envelope(payload)
     if items is None:
         return

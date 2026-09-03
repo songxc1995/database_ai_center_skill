@@ -796,3 +796,23 @@ def test_count_only_drops_the_rows_but_keeps_the_counts(monkeypatch):
     assert "items" not in out
     assert out["total"] == 85128 and out["truncated"] is True
     assert out["returned_rows"] == 2 and out["rows_omitted_by"] == "--count-only"
+
+
+def test_count_only_does_not_argue_against_what_the_caller_asked_for(monkeypatch, capsys):
+    """用了 --count-only 的人要的就是 total,而且已经拿到了完整的 total。
+
+    再劝他「re-run with --all」是反向建议 —— 和 --all 那条修的是同一类问题:文案没有按
+    调用方式分支。一条与请求相矛盾的警告,是训练人忽略警告的另一种方式。
+    """
+    monkeypatch.setattr(client_module, "_COUNT_ONLY", True)
+    client_module._warn_if_truncated(
+        {"items": [{"id": 1}], "total": 84728, "truncated": True}, "/data-quality"
+    )
+    assert capsys.readouterr().err == ""
+
+    # 没用 --count-only 时照常提醒
+    monkeypatch.setattr(client_module, "_COUNT_ONLY", False)
+    client_module._warn_if_truncated(
+        {"items": [{"id": 1}], "total": 84728, "truncated": True}, "/data-quality"
+    )
+    assert "partial_result" in capsys.readouterr().err
