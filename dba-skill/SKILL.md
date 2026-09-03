@@ -260,6 +260,34 @@ assuming `items`. Note `probe-catalog` keys its entries by `probe`, not `name` o
 Frequently useful paths that have **no** helper — reach them with `get`:
 `/dba/fleet/metric-names` (metric vocabulary), `/dba/fleet/metrics` (one metric across the fleet), `/dba/fleet/health` (fleet health scores), `/observability/main-chain` (is collection→alerting→AI flowing), `/observability/version` (which release is answering — the only way to tell whether this document is stale), `/ai/observability` (is AI analysis succeeding), `/ai/rag/status` (is knowledge retrieval available), `/data-quality` (fleet-wide metric trustworthiness, paged: read `total` and `truncated`), `/clusters` (cluster membership — the direct way to find which primary a standby belongs to), `/ai/diagnosis-quality` (AI diagnosis accuracy), `/reports/inspection` (inspection reports), `/cloud-rds/downsizing-plans` (plans already acted on, not just candidates), `/alert-silences` and `/log-alert-rules` (silences and log-alert rules).
 
+### Credentials, and running on Windows
+
+The client reads `PROJECT_API_BASE_URL` / `PROJECT_API_KEY` from, in order of precedence:
+
+1. the nearest `.env` walking up from the current directory,
+2. the process environment,
+3. `~/.dba-skill/config` — a per-user file in the same `KEY=value` format
+   (`C:\Users\<name>\.dba-skill\config` on Windows).
+
+The third exists for hosts launched from Finder/Explorer: their working directory is `/` or the
+app bundle, so there is no `.env` above them, and a GUI-launched process inherits almost nothing
+from the shell. Write that file once per machine and every host on it works — installing the
+skill somewhere new needs no other step. It only fills in what nothing else supplied, so adding
+it never changes a setup that already works.
+
+```
+# ~/.dba-skill/config      (chmod 600 on POSIX — the key is a credential)
+PROJECT_API_BASE_URL=http://10.101.240.250:8080/api/v2
+PROJECT_API_KEY=<your key>
+```
+
+If a call fails with 401/403, the error carries `per_key_source` — which file each value came
+from. "The key was revoked" and "you are reading the wrong file" produce the same status code;
+that field is how you tell them apart. It never contains the key itself.
+
+**Windows:** the examples below say `python3`; use `python` instead — the python.org installer
+provides `python.exe` and `py.exe`, not `python3`.
+
 ### "Does this instance have a backup?" has three vocabularies
 
 Three endpoints answer versions of that question in three different shapes, and reading only

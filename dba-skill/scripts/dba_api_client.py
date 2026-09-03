@@ -16,6 +16,13 @@ from typing import Any
 
 READ_TIMEOUT_DEFAULT = 15
 ENV_FILE_NAMES = (".env",)
+# One file, one location, on every OS: Path.home() is C:\\Users\\<name> on Windows and ~ on
+# POSIX. It exists because the .env search walks up from the CURRENT WORKING DIRECTORY, and a
+# host launched from Finder/Explorer has a cwd of "/" or the app bundle — no .env above it, and
+# a GUI-launched process inherits almost nothing from the shell. Hosts that behave that way
+# (WorkBuddy and whatever follows it) need a credential that does not depend on where the
+# process happens to start.
+USER_CONFIG_PATH_PARTS = (".dba-skill", "config")
 ENV_ALLOWLIST = {
     "PROJECT_API_BASE_URL",
     "PROJECT_API_KEY",
@@ -34,59 +41,132 @@ def _unquote_env_value(value: str) -> str:
 
 # Where the credentials came from, so an auth failure can say so instead of looking like a
 # revoked key. Filled by _load_env_files.
-_ENV_PROVENANCE: dict[str, Any] = {"source": None, "searched": [], "keys": []}
+_ENV_PROVENANCE: dict[str, Any] = {"source": None, "searched": [], "keys": [], "sources": {}}
 
 
 def _credential_provenance() -> dict[str, Any]:
+    """Where the credential came from — never what it is.
+
+    Paths and names only. The key itself is stripped from every message by ``_redact``; a
+    diagnostic that printed it would leak it into transcripts and screenshots, which is a far
+    wider exposure than the file it sits in.
+    """
+    _load_env_files()
     source = _ENV_PROVENANCE.get("source")
-    return {
-        "credential_source": source or "inherited process environment (no .env file found)",
+    user_config = _user_config_path()
+    out: dict[str, Any] = {
+        "credential_source": source or "inherited process environment (no config file found)",
+        "per_key_source": _ENV_PROVENANCE.get("sources") or {},
         "env_files_searched": _ENV_PROVENANCE.get("searched") or [],
+        "user_config": {
+            "path": str(user_config) if user_config else None,
+            "exists": bool(user_config and user_config.is_file()),
+        },
         "cwd": os.getcwd(),
     }
+    return out
+
+
+def _user_config_path() -> Path | None:
+    """The per-user credential file, or None when the home directory is unavailable."""
+    try:
+        return Path.home().joinpath(*USER_CONFIG_PATH_PARTS)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _apply_env_file(path: Path, *, only_if_missing: bool = False) -> list[str]:
+    """Load allowlisted KEY=value pairs from one file into ``os.environ``.
+
+    Values go into the process environment rather than being returned, because ``_redact``
+    finds the key there to strip it out of every error message. A parallel path that returned
+    the key directly would leave redaction silently doing nothing.
+    """
+    loaded: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return loaded
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if separator != "=" or key not in ENV_ALLOWLIST:
+            continue
+        if only_if_missing and str(os.environ.get(key) or "").strip():
+            continue
+        os.environ[key] = _unquote_env_value(value)
+        loaded.append(key)
+    return loaded
 
 
 def _load_env_files() -> None:
-    """Load the nearest .env, and remember whether one was found.
+    """Resolve credentials, and record which source answered for each key.
 
-    Provenance is the point. The documented production setup supplies the key through the
-    process environment (the agent runtime's own config), so *failing* when no .env is found
-    would break the normal case. But the silent version is worse than either: run from the
-    wrong directory and the stale inherited key is used without a word, so a 401 reads as
-    "the key was revoked" when it actually means "you are in the wrong directory". The fix is
-    not to refuse — it is to make every auth failure say where its credential came from.
+    Precedence, lowest to highest: the per-user config file, the process environment, the
+    nearest .env walking up from cwd.
+
+    The existing .env-beats-environment order is deliberately left alone. It is there for a
+    real failure — a stale key exported in a long-lived shell shadowing the fresh one next to
+    the project you are actually in — and it is pinned by a test. The opposite failure has also
+    happened here (a parent directory's viewer key shadowing a correctly configured ai-client
+    key, whose 403 read as "revoked"), which is the point: whichever way precedence runs, two
+    sources disagreeing is the problem, not the order. So the config file goes in at the bottom
+    and nothing above it moves, and `per_key_source` says which file each key actually came
+    from — the answer that ends the argument either way.
     """
     global _ENV_FILES_LOADED
     if _ENV_FILES_LOADED:
         return
     _ENV_FILES_LOADED = True
 
+    sources: dict[str, str] = {
+        key: "process environment"
+        for key in ENV_ALLOWLIST
+        if str(os.environ.get(key) or "").strip()
+    }
+
+    user_config = _user_config_path()
+    if user_config is not None and user_config.is_file():
+        # Bottom of the stack: only fills in what nothing else supplied. This is the path that
+        # makes a Finder-launched host work at all — no cwd to search from, nothing inherited.
+        for key in _apply_env_file(user_config, only_if_missing=True):
+            sources[key] = str(user_config)
+        if any(src == str(user_config) for src in sources.values()):
+            _ENV_PROVENANCE["source"] = str(user_config)
+
     try:
         search_roots = (Path.cwd().resolve(), *Path.cwd().resolve().parents)
     except OSError:
+        search_roots = ()
         _ENV_PROVENANCE["searched"] = ["<cwd unavailable>"]
-        return
-    _ENV_PROVENANCE["searched"] = [str(d) for d in search_roots]
+    else:
+        _ENV_PROVENANCE["searched"] = [str(d) for d in search_roots]
 
     for directory in search_roots:
+        found = False
         for filename in ENV_FILE_NAMES:
             path = directory / filename
             if not path.is_file():
                 continue
-            for raw_line in path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if line.startswith("export "):
-                    line = line[len("export ") :].strip()
-                key, separator, value = line.partition("=")
-                key = key.strip()
-                if separator != "=" or key not in ENV_ALLOWLIST:
-                    continue
-                os.environ[key] = _unquote_env_value(value)
+            for key in _apply_env_file(path):
+                sources[key] = str(path)
                 _ENV_PROVENANCE.setdefault("keys", []).append(key)
             _ENV_PROVENANCE["source"] = str(path)
-            return
+            found = True
+            break
+        if found:
+            break
+
+    _ENV_PROVENANCE["sources"] = sources
+    if not sources:
+        _ENV_PROVENANCE["source"] = None
+    elif _ENV_PROVENANCE.get("source") is None:
+        _ENV_PROVENANCE["source"] = "process environment"
 
 
 def _env(name: str, default: str | None = None) -> str | None:

@@ -225,6 +225,54 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(query["limit"], ["25"])
         self.assertEqual(query["offset"], ["50"])
 
+
+    def test_user_config_file_answers_when_there_is_no_env_and_no_cwd_to_search(self):
+        """Finder/Explorer 启动的宿主:cwd 是 / 或 app bundle,向上找不到任何 .env,而 GUI
+        进程几乎继承不到 shell 里 export 的东西 —— 这时唯一的凭据来源就是这个文件。
+        """
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as work_dir:
+            config = Path(home_dir, ".dba-skill", "config")
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                f"PROJECT_API_BASE_URL=http://127.0.0.1:{self.server.server_port}/api/v2\n"
+                "PROJECT_API_KEY=user-config-key\n",
+                encoding="utf-8",
+            )
+            env = {k: v for k, v in os.environ.items()
+                   if k not in ("PROJECT_API_KEY", "PROJECT_API_BASE_URL")}
+            env["HOME"] = home_dir
+            env["USERPROFILE"] = home_dir  # Windows 上 Path.home() 读这个
+
+            result = self.run_client("inventory-summary", env=env, cwd=work_dir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        headers = {k.lower(): v for k, v in RecordingHandler.requests[-1]["headers"].items()}
+        self.assertEqual(headers["x-api-key"], "user-config-key")
+
+    def test_user_config_never_shadows_a_key_that_is_already_configured(self):
+        """配置文件在最底层:它只补空缺,不覆盖已经配好的东西。
+
+        否则给 Claude Code 用户加一个配置文件,就会悄悄改掉他 settings.json 里那把 key ——
+        而两个来源打架、其中一个静默获胜,正是本仓库两个方向都栽过的那件事。
+        """
+        with tempfile.TemporaryDirectory() as home_dir, tempfile.TemporaryDirectory() as work_dir:
+            config = Path(home_dir, ".dba-skill", "config")
+            config.parent.mkdir(parents=True)
+            config.write_text("PROJECT_API_KEY=user-config-key\n", encoding="utf-8")
+            env = {
+                **os.environ,
+                "HOME": home_dir,
+                "USERPROFILE": home_dir,
+                "PROJECT_API_BASE_URL": f"http://127.0.0.1:{self.server.server_port}/api/v2",
+                "PROJECT_API_KEY": "already-configured-key",
+            }
+
+            result = self.run_client("inventory-summary", env=env, cwd=work_dir)
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        headers = {k.lower(): v for k, v in RecordingHandler.requests[-1]["headers"].items()}
+        self.assertEqual(headers["x-api-key"], "already-configured-key")
+        self.assertNotIn("user-config-key", result.stderr)
     def test_diagnostics_run_posts_only_allowlisted_checks(self):
         result = self.run_client(
             "diagnostics-run",
@@ -681,3 +729,29 @@ def test_a_closed_pipe_is_not_reported_as_a_failure():
     _, err = proc.communicate()
     assert b"BrokenPipeError" not in err, err.decode("utf-8", "replace")[:400]
     assert proc.returncode == 0, "a caller truncating our output is not our failure"
+
+
+def test_provenance_names_the_config_file_but_never_the_key(monkeypatch, tmp_path):
+    """凭据从哪来必须说得出 —— 否则 401 又变回「说不清是 key 被吊销还是找错了文件」。
+
+    只说路径,永远不说 key 本身:打印出来就进了聊天记录和截图,那比它待着的那个文件
+    暴露面大得多。
+    """
+    config = tmp_path / ".dba-skill" / "config"
+    config.parent.mkdir(parents=True)
+    config.write_text("PROJECT_API_KEY=secret-from-file\n", encoding="utf-8")
+
+    monkeypatch.setattr(client_module.Path, "home", staticmethod(lambda: tmp_path))
+    monkeypatch.delenv("PROJECT_API_KEY", raising=False)
+    monkeypatch.delenv("PROJECT_API_BASE_URL", raising=False)
+    monkeypatch.setattr(client_module, "_ENV_FILES_LOADED", False)
+    monkeypatch.setattr(client_module, "_ENV_PROVENANCE",
+                        {"source": None, "searched": [], "keys": [], "sources": {}})
+    monkeypatch.chdir(tmp_path)
+
+    prov = client_module._credential_provenance()
+
+    assert str(config) in json.dumps(prov, ensure_ascii=False), prov
+    assert prov["user_config"]["exists"] is True
+    assert prov["per_key_source"]["PROJECT_API_KEY"] == str(config)
+    assert "secret-from-file" not in json.dumps(prov, ensure_ascii=False)
