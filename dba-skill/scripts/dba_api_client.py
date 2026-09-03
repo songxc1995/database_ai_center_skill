@@ -211,6 +211,8 @@ def _redact(value: str) -> str:
 
 
 def _fail(error: str, message: str, *, exit_code: int = 1, **extra: Any) -> None:
+    global _LAST_FAILURE
+    _LAST_FAILURE = _redact(message)
     payload = {"error": error, "message": _redact(message), **extra}
     sys.stderr.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     raise SystemExit(exit_code)
@@ -263,6 +265,7 @@ def _positive_int(raw: str) -> int:
 # Set from --all. A partial page and a complete one look identical, so opting into the whole
 # answer has to be one flag, not a paging loop the caller has to write correctly every time.
 _FETCH_ALL = False
+_LAST_FAILURE: str | None = None
 # Pages --all will follow before giving up. A guard against an endpoint that never advances,
 # not a preference — but it was invisible: not in SKILL.md, not in --help, only in the source,
 # so hitting it looked like "that is all the data there is".
@@ -522,6 +525,68 @@ def _strip_volatile(value: Any) -> Any:
     return value
 
 
+def _fan_out(args: argparse.Namespace, ids: list[int]) -> dict[str, Any]:
+    """Run the same per-instance command for several instances, and account for every one.
+
+    Replaces the shell loop this was written as seventeen times in one week — seven process
+    starts, seven credential resolutions, seven fragments of parsing. The reason it is not a
+    plain list comprehension is the rate limit: live-database reads are capped at 30/minute
+    and 10/minute per instance, so a wide fan-out will have some calls rejected. Dropping
+    those would hand back a short list shaped exactly like a complete one, which is the defect
+    this client keeps having to unlearn — so every requested id ends up in `results` or in
+    `failed`, and `partial` is true whenever anything failed.
+    """
+    results: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    for instance_id in ids:
+        scoped = argparse.Namespace(**vars(args))
+        scoped.instance_id = instance_id
+        try:
+            payload = args.func(scoped)
+        except SystemExit as exc:
+            failed.append({"instance_id": instance_id,
+                           "error": _LAST_FAILURE or f"exit {exc.code}"})
+            continue
+        except Exception as exc:  # noqa: BLE001 - one instance failing must not end the run
+            failed.append({"instance_id": instance_id, "error": _short_reason(exc)})
+            continue
+        results.append({"instance_id": instance_id, "result": payload})
+
+    out: dict[str, Any] = {
+        "requested": ids,
+        "returned": len(results),
+        "items": results,
+        "partial": bool(failed),
+    }
+    if failed:
+        out["failed"] = failed
+        sys.stderr.write(json.dumps({
+            "warning": "partial_result",
+            "message": (
+                f"{len(failed)} of {len(ids)} instances did not answer "
+                f"({', '.join(str(f['instance_id']) for f in failed)}). See `failed` for why. "
+                f"Live-database reads are capped at 30/minute and 10/minute per instance."
+            ),
+        }, ensure_ascii=False) + "\n")
+    return out
+
+
+def _parse_instance_ids(raw: str) -> list[int]:
+    ids: list[int] = []
+    for chunk in raw.replace(" ", "").split(","):
+        if not chunk:
+            continue
+        if not chunk.isdigit():
+            _fail("invalid_instance_ids", f"--instance-ids takes a comma-separated list of "
+                                          f"numbers; got {chunk!r}", exit_code=2)
+        value = int(chunk)
+        if value not in ids:
+            ids.append(value)
+    if not ids:
+        _fail("invalid_instance_ids", "--instance-ids was empty", exit_code=2)
+    return ids
+
+
 def _platform_version() -> str | None:
     """Which release answered, so a diff can tell a redefinition from a real change."""
     try:
@@ -547,9 +612,12 @@ def _snapshot_fingerprint(argv: list[str]) -> str:
     """
     import hashlib
 
+    # Everything that shapes the OUTPUT rather than the question. Leaving one out silently
+    # splits the fingerprint, so a snapshot taken one way never matches a diff asked for
+    # another way — which surfaces as "no snapshot" for a snapshot that plainly exists.
     skip_with_value = {"--fields", "--format", "--sort-by", "--group-by", "--since",
                        "--max-pages"}
-    skip_flags = {"--snapshot", "--desc", "--count-only", "--all"}
+    skip_flags = {"--snapshot", "--desc", "--count-only", "--all", "--only-if-changed"}
     parts, i = [], 0
     while i < len(argv):
         token = argv[i]
@@ -920,6 +988,10 @@ def _common_filters(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--tenant-id")
     parser.add_argument("--instance-type")
     parser.add_argument("--instance-id", type=int)
+    parser.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     parser.add_argument("--department")
     parser.add_argument("--service-domain")
     parser.add_argument("--business")
@@ -1572,6 +1644,13 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
              "with — an empty diff and 'no snapshot' must never look alike.",
     )
     parser.add_argument(
+        "--only-if-changed", action="store_true",
+        default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="With --since: print nothing and exit 0 when nothing changed. For scheduled runs "
+             "— an hourly report that is identical every hour trains its reader to skip it. "
+             "Still fails loudly when there is no baseline to compare with.",
+    )
+    parser.add_argument(
         "--group-by", metavar="FIELD",
         default=(argparse.SUPPRESS if suppress_defaults else None),
         help="Count rows per distinct value of FIELD (dotted paths allowed). Rows missing the "
@@ -1615,6 +1694,10 @@ def build_parser() -> argparse.ArgumentParser:
              "database count/coverage, and active alerts — in one call.",
     )
     instance.add_argument("--instance-id", type=int)
+    instance.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     instance.add_argument("--ip")
     instance.add_argument("--host")
     instance.set_defaults(func=cmd_instance)
@@ -1625,7 +1708,12 @@ def build_parser() -> argparse.ArgumentParser:
              "declared backup method, ownership and ELK log coverage — metrics flowing says "
              "nothing about any of them.",
     )
-    onboarding.add_argument("--instance-id", type=int, required=True)
+    onboarding.add_argument("--instance-id", type=int)
+    onboarding.set_defaults(_needs_instance=True)
+    onboarding.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     onboarding.set_defaults(func=cmd_onboarding_check)
 
     resolve = sub.add_parser("resolve")
@@ -1641,6 +1729,10 @@ def build_parser() -> argparse.ArgumentParser:
     context = sub.add_parser("context")
     context.add_argument("--alert-id", type=int)
     context.add_argument("--instance-id", type=int)
+    context.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     context.add_argument("--database-id", type=int)
     context.add_argument("--refresh-ai-context", action="store_true")
     context.add_argument("--stale-after-hours", type=int)
@@ -1659,6 +1751,10 @@ def build_parser() -> argparse.ArgumentParser:
     alerts_v2.add_argument("--status", default="active", choices=["active", "resolved", "all"])
     alerts_v2.add_argument("--severity")
     alerts_v2.add_argument("--instance-id", type=int)
+    alerts_v2.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     alerts_v2.add_argument("--limit", type=_positive_int, default=200)
     alerts_v2.set_defaults(func=cmd_alerts)
 
@@ -1706,7 +1802,12 @@ def build_parser() -> argparse.ArgumentParser:
         "silence-report",
         help="Why an instance might not be alerting: all 5 mechanisms (v3.32+)",
     )
-    silr.add_argument("--instance-id", type=int, required=True)
+    silr.add_argument("--instance-id", type=int)
+    silr.set_defaults(_needs_instance=True)
+    silr.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     silr.set_defaults(func=cmd_silence_report)
 
     alerts = sub.add_parser("alerts-list")
@@ -1715,6 +1816,10 @@ def build_parser() -> argparse.ArgumentParser:
     alerts.add_argument("--severity")
     alerts.add_argument("--tenant-id")
     alerts.add_argument("--instance-id", type=int)
+    alerts.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     alerts.add_argument("--page", type=_positive_int, default=1)
     alerts.add_argument("--page-size", type=_positive_int, default=20)
     alerts.add_argument("--start-time")
@@ -1773,22 +1878,42 @@ def build_parser() -> argparse.ArgumentParser:
     directory.set_defaults(func=cmd_directory_options)
 
     freshness = sub.add_parser("freshness")
-    freshness.add_argument("--instance-id", type=int, required=True)
+    freshness.add_argument("--instance-id", type=int)
+    freshness.set_defaults(_needs_instance=True)
+    freshness.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     freshness.add_argument("--stale-after-hours", type=int)
     freshness.set_defaults(func=cmd_freshness)
 
     timeline = sub.add_parser("timeline")
-    timeline.add_argument("--instance-id", type=int, required=True)
+    timeline.add_argument("--instance-id", type=int)
+    timeline.set_defaults(_needs_instance=True)
+    timeline.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     timeline.add_argument("--hours", type=int)
     timeline.add_argument("--limit", type=int)
     timeline.set_defaults(func=cmd_timeline)
 
     catalog = sub.add_parser("diagnostics-catalog")
-    catalog.add_argument("--instance-id", type=int, required=True)
+    catalog.add_argument("--instance-id", type=int)
+    catalog.set_defaults(_needs_instance=True)
+    catalog.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     catalog.set_defaults(func=cmd_diagnostics_catalog)
 
     run = sub.add_parser("diagnostics-run")
-    run.add_argument("--instance-id", type=int, required=True)
+    run.add_argument("--instance-id", type=int)
+    run.set_defaults(_needs_instance=True)
+    run.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     run.add_argument("--checks", required=True)
     run.add_argument("--timeout-seconds", type=int)
     run.add_argument("--database-name")
@@ -1815,11 +1940,21 @@ def build_parser() -> argparse.ArgumentParser:
     get_cmd.set_defaults(func=cmd_get)
 
     probe_catalog = sub.add_parser("probe-catalog")
-    probe_catalog.add_argument("--instance-id", type=int, required=True)
+    probe_catalog.add_argument("--instance-id", type=int)
+    probe_catalog.set_defaults(_needs_instance=True)
+    probe_catalog.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     probe_catalog.set_defaults(func=cmd_probe_catalog)
 
     probe_run = sub.add_parser("probe-run")
-    probe_run.add_argument("--instance-id", type=int, required=True)
+    probe_run.add_argument("--instance-id", type=int)
+    probe_run.set_defaults(_needs_instance=True)
+    probe_run.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     probe_run.add_argument("--probe", required=True)
     probe_run.add_argument("--sql-id")
     probe_run.add_argument("--session-id", type=int)
@@ -1832,7 +1967,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Read-only instant PromQL against a TiDB instance's Prometheus (hotspots, "
         "golden signals, per-store flow, metric-name verification). Read-only, SSRF-guarded.",
     )
-    prometheus_query.add_argument("--instance-id", type=int, required=True)
+    prometheus_query.add_argument("--instance-id", type=int)
+    prometheus_query.set_defaults(_needs_instance=True)
+    prometheus_query.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     prometheus_query.add_argument("--query", required=True, help="a single instant PromQL expression")
     prometheus_query.add_argument("--url", help="override Prometheus URL (defaults to saved extra.prometheus_url)")
     prometheus_query.set_defaults(func=cmd_prometheus_query)
@@ -1909,7 +2049,12 @@ def build_parser() -> argparse.ArgumentParser:
         "backups",
         help="One instance's backup status + evidence-based determination (has-backup verdict; v2.98+)",
     )
-    backups.add_argument("--instance-id", type=int, required=True)
+    backups.add_argument("--instance-id", type=int)
+    backups.set_defaults(_needs_instance=True)
+    backups.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
     backups.add_argument(
         "--refresh", action="store_true",
         help="Force a live Oracle RMAN refresh (slow); default serves the stored daily-swept status",
@@ -1930,13 +2075,28 @@ def main(argv: list[str] | None = None) -> int:
     _FETCH_ALL = bool(getattr(args, "all", False))
     _MAX_PAGES = int(getattr(args, "max_pages", None) or _MAX_PAGES)
     _COUNT_ONLY = bool(getattr(args, "count_only", False))
-    payload = args.func(args)
+    ids_raw = getattr(args, "instance_ids", None)
+    if getattr(args, "_needs_instance", False) and not ids_raw and getattr(args, "instance_id", None) is None:
+        # argparse cannot express "exactly one of these two", and making --instance-id required
+        # would reject the batch form outright. Checked here so the message names both.
+        _fail("missing_instance", "This command needs --instance-id N, or --instance-ids "
+                                  "N,N,N to run it for several at once.", exit_code=2)
+    if ids_raw and getattr(args, "instance_id", None) is not None:
+        _fail("conflicting_instance", "Pass --instance-id or --instance-ids, not both.",
+              exit_code=2)
+    if ids_raw:
+        payload = _fan_out(args, _parse_instance_ids(ids_raw))
+    else:
+        payload = args.func(args)
     fresh = payload  # what the server just said, before any diffing rewrites `payload`
 
     since_raw = getattr(args, "since", None)
     want_snapshot = bool(getattr(args, "snapshot", False))
     platform_version = _platform_version() if (since_raw or want_snapshot) else None
 
+    if getattr(args, "only_if_changed", False) and not since_raw:
+        _fail("missing_since", "--only-if-changed needs --since: without a baseline there is "
+                               "nothing to be quiet about.", exit_code=2)
     if since_raw:
         since = _parse_since(since_raw)
         if since is None:
@@ -1964,6 +2124,14 @@ def main(argv: list[str] | None = None) -> int:
             "current_at": datetime.now(timezone.utc).isoformat(),
             **diff,
         }
+        if getattr(args, "only_if_changed", False) and not (
+            diff["added"] or diff["removed"] or diff["changed"]
+        ):
+            # Silence is the message. Note the baseline is still refreshed below when
+            # --snapshot was asked for, so tomorrow compares against today, not last week.
+            if want_snapshot:
+                _write_snapshot(fresh, sys.argv[1:], platform_version)
+            return 0
 
     if want_snapshot:
         # Snapshot what the server said, not the diff — and never by calling the endpoint a

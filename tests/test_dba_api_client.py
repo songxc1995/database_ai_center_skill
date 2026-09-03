@@ -921,3 +921,54 @@ def test_rows_without_an_identity_are_reported_not_paired_by_position():
     )
     assert d["uncomparable_rows"] == 4
     assert d["added"] == [] and d["removed"] == [] and d["changed"] == []
+
+
+def test_fan_out_accounts_for_every_requested_instance():
+    """扇出时把失败的那台悄悄丢掉,会给出一个「长得和完整答案一样」的短名单 —— 这个客户端
+    这一周反复在改的就是这个形状。实时库读取有 30/分钟、单实例 10/分钟的限流,宽扇出必然
+    会有被拒的,所以每个 id 要么在 items 要么在 failed。
+    """
+    import argparse as _ap
+
+    calls = []
+
+    def fake(ns):
+        calls.append(ns.instance_id)
+        if ns.instance_id == 27:
+            raise RuntimeError("HTTP 429 rate limited")
+        return {"determination": "verified", "id": ns.instance_id}
+
+    args = _ap.Namespace(func=fake, instance_id=None)
+    out = client_module._fan_out(args, [14, 27, 206])
+
+    assert out["requested"] == [14, 27, 206] and calls == [14, 27, 206]
+    assert out["returned"] == 2 and out["partial"] is True
+    assert [f["instance_id"] for f in out["failed"]] == [27]
+    assert "429" in out["failed"][0]["error"]
+    # 每个 id 都有交代,一个都不少
+    accounted = {r["instance_id"] for r in out["items"]} | {f["instance_id"] for f in out["failed"]}
+    assert accounted == {14, 27, 206}
+
+
+def test_instance_ids_rejects_junk_instead_of_guessing():
+    import pytest as _pytest
+
+    assert client_module._parse_instance_ids("14, 20 ,20,27") == [14, 20, 27], "去重且保序"
+    with _pytest.raises(SystemExit):
+        client_module._parse_instance_ids("14,abc")
+    with _pytest.raises(SystemExit):
+        client_module._parse_instance_ids("")
+
+
+def test_snapshot_fingerprint_ignores_flags_that_only_shape_the_output():
+    """指纹漏掉一个输出类参数,会把「同一个问题」拆成两个 —— 表现为一份明明存在的快照
+    报「没有快照」。这条在实测中真的发生过(--only-if-changed 当时不在排除表里)。
+    """
+    base = ["get", "/dba/backups/coverage", "--param", "limit=500"]
+    fp = client_module._snapshot_fingerprint(base)
+    for extra in (["--snapshot"], ["--only-if-changed"], ["--desc"], ["--count-only"],
+                  ["--all"], ["--fields", "id"], ["--format", "csv"],
+                  ["--group-by", "verdict"], ["--sort-by", "id"], ["--max-pages", "9"]):
+        assert client_module._snapshot_fingerprint(extra + base) == fp, extra
+    # 但改变问题本身的参数必须换指纹
+    assert client_module._snapshot_fingerprint(base + ["--param", "verdict=at_risk"]) != fp

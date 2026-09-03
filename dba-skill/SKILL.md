@@ -277,6 +277,27 @@ grouped answer whose denominator quietly shrank is worse than no grouping. `--so
 rows without the field at the end in both directions — "no value" and "smallest value" are
 different facts.
 
+### Several instances at once
+
+Per-instance commands take `--instance-ids 14,20,27` as well as `--instance-id N`:
+
+```
+python scripts/dba_api_client.py backups --instance-ids 14,20,27,206,207
+```
+
+One process, one credential resolution, one array back. Live-database reads are capped at
+30/minute and 10/minute per instance, so a wide fan-out will have some calls rejected — every
+requested id therefore lands in `items` or in `failed`, `partial` says whether anything did,
+and a stderr warning names the ones that did not. A short list shaped exactly like a complete
+one is the failure this avoids.
+
+### Scheduled runs that stay worth reading
+
+`--only-if-changed` (with `--since`) prints nothing and exits 0 when nothing moved. An hourly
+report that is identical every hour teaches its reader to skip it, and then the one hour that
+differs gets skipped too. It still fails loudly when there is no baseline — being quiet about
+"nothing changed" and quiet about "I could not tell" are different things.
+
 ### "What changed since last time?"
 
 Every other command answers "how is it right now". This one answers the question a DBA
