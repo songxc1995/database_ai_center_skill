@@ -972,3 +972,76 @@ def test_snapshot_fingerprint_ignores_flags_that_only_shape_the_output():
         assert client_module._snapshot_fingerprint(extra + base) == fp, extra
     # 但改变问题本身的参数必须换指纹
     assert client_module._snapshot_fingerprint(base + ["--param", "verdict=at_risk"]) != fp
+
+
+def test_envelope_recognises_every_collection_key_the_platform_uses():
+    """SKILL.md 列了九种集合键,而 _envelope 只实现了两种 —— 文档说一套、代码做一套。
+
+    后果是 --sort-by / --group-by 在 probe-run(rows)、elk-search(hits)、timeline(events)
+    上静默无效,而那恰恰是最需要排序的地方:段按大小、慢 SQL 按耗时、日志按级别。
+    """
+    for key in ("items", "rows", "instances", "events", "entries", "results", "hits", "probes"):
+        rows, meta = client_module._envelope({key: [{"a": 1}], "total": 1})
+        assert rows == [{"a": 1}], key
+        assert meta["items_key"] == key
+        assert meta["total"] == 1
+
+    assert client_module._envelope([{"a": 1}])[0] == [{"a": 1}]
+    assert client_module._envelope({"version": "3.57.0"})[0] is None, "单对象不是集合"
+
+
+def test_sort_and_group_fail_loudly_on_a_single_object():
+    """--format csv 早就在这种情况下报错;另外两个开关却静默返回原样,同一个状况两种待遇。
+
+    静默无效意味着 exit 0、输出与裸调用逐字节相同、stderr 空 —— 使用者没有任何线索。
+    """
+    import pytest as _pytest
+
+    for call in (lambda: client_module._sort_rows({"version": "1"}, "x", False),
+                 lambda: client_module._group_rows({"version": "1"}, "x")):
+        with _pytest.raises(SystemExit):
+            call()
+
+
+def test_numeric_strings_sort_as_numbers_not_as_text():
+    """Oracle 探针把 size_gb 返回成字符串 "109.67"。按文本比较会把 "44.82" 排在它前面 ——
+    一个错误的顺序比不排序更糟,因为它看起来像个答案。
+    """
+    rows = [{"size_gb": "44.82"}, {"size_gb": "109.67"}, {"size_gb": "9.5"}]
+    out = client_module._sort_rows({"rows": rows}, "size_gb", True)["rows"]
+    assert [r["size_gb"] for r in out] == ["109.67", "44.82", "9.5"]
+
+    # 但日期不能被当成数字
+    days = [{"day": "2026-08-29"}, {"day": "2026-09-03"}, {"day": "2026-09-01"}]
+    out = client_module._sort_rows({"rows": days}, "day", True)["rows"]
+    assert [r["day"] for r in out] == ["2026-09-03", "2026-09-01", "2026-08-29"]
+
+
+def test_sorted_rows_go_back_under_their_own_key():
+    """按列表长度猜要放回哪个键,会在响应带两个等长列表时改错字段。"""
+    payload = {"rows": [{"n": 2}, {"n": 1}], "other_list": [{"n": 9}, {"n": 8}]}
+    out = client_module._sort_rows(payload, "n", False)
+    assert [r["n"] for r in out["rows"]] == [1, 2]
+    assert out["other_list"] == [{"n": 9}, {"n": 8}], "别的列表一动不动"
+
+
+def test_batch_mode_tells_you_the_field_name_instead_of_making_you_infer_it():
+    """--instance-ids 把每台的答案包成 {instance_id, result},于是单台模式下能用的字段名
+    在批量下都要加一层 result. —— 两种模式字段名不一致。
+
+    可用字段列表能让人自己发现,但工具本来就知道答案,说出来比让人推更好。
+    """
+    import pytest as _pytest
+
+    payload = {"items": [
+        {"instance_id": 14, "result": {"determination": "verified", "local": {"status": "ok"}}},
+        {"instance_id": 20, "result": {"determination": "unknown", "local": {"status": None}}},
+    ]}
+    with _pytest.raises(SystemExit) as exc:
+        client_module._project(payload, ["instance_id", "determination"])
+    message = str(exc.value)
+    assert "determination → result.determination" in message
+
+    # 多级路径本来就该能用
+    out = client_module._project(payload, ["instance_id", "result.local.status"])
+    assert [r["result.local.status"] for r in out["items"]] == ["ok", None]

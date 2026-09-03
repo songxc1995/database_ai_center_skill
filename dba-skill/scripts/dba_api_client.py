@@ -292,25 +292,41 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None, bo
     return payload
 
 
+# Every key the platform puts a collection under. SKILL.md has listed all of these for a
+# while; this function implemented two of them, so --sort-by and --group-by silently did
+# nothing on probe-run (rows), elk-search (hits), timeline (events) and the rest — exactly the
+# places where sorting matters most: segments by size, slow SQL by time, logs by level.
+# Order is priority: a response carrying more than one list is read as the first match.
+COLLECTION_KEYS: tuple[str, ...] = (
+    "items", "rows", "instances", "events", "entries", "results", "hits", "probes", "matches",
+)
+
+
 def _envelope(payload: Any) -> tuple[list[Any] | None, dict[str, Any]]:
-    """Split a response into (items, meta) across the three shapes the platform returns.
+    """Split a response into (items, meta) across every shape the platform returns.
 
     There is no single envelope: `ai-endpoints` and `metrics/{id}/latest` return a bare list;
-    `instances` and `instances/database-inventory` return
-    {items, total, limit, offset, truncated}; `alerts` returns
-    {items, total, page, page_size, has_next} — a different pagination vocabulary again.
-    Every consumer otherwise has to probe defensively, and guessing wrong turns into
-    'str' object has no attribute 'get' at the worst moment.
+    `instances` returns {items, total, limit, offset, truncated}; `alerts` returns
+    {items, total, page, page_size, has_next}; probes return {rows, ...}; ELK returns {hits};
+    the knowledge base returns {entries} and {results}. Every consumer otherwise has to probe
+    defensively, and guessing wrong turns into 'str' object has no attribute 'get' at the
+    worst moment.
+
+    `meta["items_key"]` names the key the rows came from, so anything that rewrites the
+    collection can put it back where it belongs instead of guessing.
 
     Returns (None, {}) for a single object, which is not a collection and must not be
     silently treated as one.
     """
     if isinstance(payload, list):
         return payload, {"shape": "list", "total": len(payload)}
-    if isinstance(payload, dict) and isinstance(payload.get("items"), list):
-        meta = {key: value for key, value in payload.items() if key != "items"}
-        meta["shape"] = "envelope"
-        return payload["items"], meta
+    if isinstance(payload, dict):
+        for key in COLLECTION_KEYS:
+            if isinstance(payload.get(key), list):
+                meta = {k: v for k, v in payload.items() if k != key}
+                meta["shape"] = "envelope"
+                meta["items_key"] = key
+                return payload[key], meta
     return None, {}
 
 
@@ -483,9 +499,19 @@ def _project(payload: Any, fields: list[str] | None) -> Any:
         nested = [
             f"{k}.{sub}" for k, v in sample.items() if isinstance(v, dict) for sub in sorted(v)
         ]
+        # --instance-ids wraps each answer as {instance_id, result}, so every field name that
+        # works for one instance needs a `result.` in front of it for a batch. Saying which
+        # prefix would have worked beats leaving the reader to infer it from a field list.
+        rebased = [
+            f"{key} → result.{key}" for key in unmatched
+            if not key.startswith("result.")
+            and any(_dig(row, f"result.{key}") is not _MISSING for row in dict_rows)
+        ]
         raise SystemExit(
             f"--fields: no such field(s): {', '.join(unmatched)}. "
-            f"Available: {', '.join(available)}"
+            + (f"In batch mode each row is {{instance_id, result}} — try: "
+               f"{', '.join(rebased)}. " if rebased else "")
+            + f"Available: {', '.join(available)}"
             + (f"; nested: {', '.join(nested[:20])}" if nested else "")
         )
     picked = [
@@ -793,7 +819,12 @@ def _sort_rows(payload: Any, sort_by: str | None, descending: bool) -> Any:
         return payload
     items, meta = _envelope(payload)
     if items is None:
-        return payload
+        # Same treatment --format csv already gives this case. Returning the payload untouched
+        # meant --sort-by on a single object exited 0 with byte-identical output and an empty
+        # stderr: the flag did nothing and said nothing.
+        _fail("not_a_collection",
+              f"--sort-by needs a collection; this response is a single object. "
+              f"Collections arrive under: {', '.join(COLLECTION_KEYS)}.", exit_code=2)
     missing = object()
 
     def key(row: Any):
@@ -804,7 +835,14 @@ def _sort_rows(payload: Any, sort_by: str | None, descending: bool) -> Any:
             return (0, int(value), "")
         if isinstance(value, (int, float)):
             return (0, value, "")
-        return (0, 0, str(value))
+        # Numbers arrive as strings often enough that ignoring it is not an option: Oracle
+        # probes return size_gb as "109.67", and comparing those as text puts "44.82" above
+        # "109.67". A wrong order is worse than no order — it looks like an answer.
+        text = str(value)
+        try:
+            return (0, float(text), "")
+        except ValueError:
+            return (0, 0, text)
 
     ordered = sorted(items, key=key, reverse=descending)
     # Rows without the field stay at the end whichever way the rest is sorted.
@@ -823,7 +861,9 @@ def _group_rows(payload: Any, group_by: str) -> Any:
     """
     items, _meta = _envelope(payload)
     if items is None:
-        return payload
+        _fail("not_a_collection",
+              f"--group-by needs a collection; this response is a single object. "
+              f"Collections arrive under: {', '.join(COLLECTION_KEYS)}.", exit_code=2)
     counts: dict[str, int] = {}
     for row in items:
         value = _dig(row, group_by) if isinstance(row, dict) else _MISSING
@@ -846,13 +886,15 @@ def _group_rows(payload: Any, group_by: str) -> Any:
 
 
 def _replace_items(payload: Any, rows: list[Any], meta: dict[str, Any]) -> Any:
-    """Put a reordered collection back where it came from, whatever the envelope calls it."""
+    """Put a reordered collection back under the key it came from.
+
+    Matching by list length instead would silently rewrite the wrong field whenever a response
+    carries two lists of equal size.
+    """
     if meta.get("shape") == "list" or not isinstance(payload, dict):
         return rows
-    for key, value in payload.items():
-        if isinstance(value, list) and len(value) == len(rows):
-            return {**payload, key: rows}
-    return payload
+    key = meta.get("items_key")
+    return {**payload, key: rows} if key else payload
 
 
 def _to_csv(payload: Any) -> str | None:
