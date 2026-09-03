@@ -44,6 +44,11 @@ about.
 **One IP, one call:** `instance --ip <ip>` returns detail, freshness, backups, database
 count/coverage and active alerts together. `onboarding-check --instance-id N` answers whether
 a newly onboarded instance is actually wired up (databases, backup method, ownership, ELK).
+Each check has four outcomes, not two — read `missing` (a real gap), `not_applicable` (cloud
+RDS backups belong to the vendor, a cluster component's owner is held by the cluster head, a
+retired instance is not being onboarded), `unknown` (nobody could answer right now), and only
+then `ok`. Counting `not_applicable` as a gap put a permanent red mark on 136 of 195
+instances; counting `unknown` as a gap invented 17 more out of a rate limit.
 
 
 These are the places where a confident-sounding answer is most likely to be wrong. Read them
@@ -285,11 +290,13 @@ Per-instance commands take `--instance-ids 14,20,27` as well as `--instance-id N
 python scripts/dba_api_client.py backups --instance-ids 14,20,27,206,207
 ```
 
-One process, one credential resolution, one array back. Live-database reads are capped at
-30/minute and 10/minute per instance, so a wide fan-out will have some calls rejected — every
-requested id therefore lands in `items` or in `failed`, `partial` says whether anything did,
-and a stderr warning names the ones that did not. A short list shaped exactly like a complete
-one is the failure this avoids.
+One process, one credential resolution, one array back. Reads are capped (600/minute
+globally, 30/minute and 10/minute per instance for live-database probes), so a wide fan-out
+will be throttled — a 429 is retried with backoff, and only a genuinely exhausted quota
+fails. Every requested id lands in `items` or in `failed`; `partial` is true when anything
+failed **or** when an answer was built on a dependency that could not be read
+(`degraded_instances` names those). A short list shaped exactly like a complete one, and a
+complete-looking answer assembled from a half-read, are the two failures this avoids.
 
 ### Scheduled runs that stay worth reading
 

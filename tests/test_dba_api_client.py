@@ -671,6 +671,11 @@ def test_onboarding_check_separates_unreadable_from_uncovered(monkeypatch):
             return {"items": [{"id": 1}], "total": 1}
         if path == "/instances/5/backups":
             return {"backup_method": "rman"}
+        if path == "/dba/backups/coverage":
+            # The real endpoint always answers with an envelope. A dict carrying no
+            # collection key now reads as "unreadable", so the fake has to have the shape
+            # the platform actually sends — otherwise it pins a response nothing returns.
+            return {"items": [{"instance_id": 5, "verdict": "ok"}], "counts": {}}
         return {}
 
     monkeypatch.setattr(client, "_try_get", fake_get)
@@ -681,6 +686,9 @@ def test_onboarding_check_separates_unreadable_from_uncovered(monkeypatch):
     def broken_elk(path, params=None):
         return {"unavailable": True} if path == "/elk/coverage" else fake_get(path, params)
 
+    # A second invocation in the same process is a second run: the fleet-wide cache that
+    # makes a fan-out cheap must not answer this scenario with the previous one's data.
+    client._SHARED_CACHE.clear()
     monkeypatch.setattr(client, "_try_get", broken_elk)
     out = client.cmd_onboarding_check(argparse.Namespace(instance_id=5))
     assert out["checks"]["elk_logs"]["ok"] is None, "unreadable must not read as uncovered"
@@ -1118,3 +1126,207 @@ def test_onboarding_check_keeps_unreadable_apart_from_uncovered(monkeypatch):
     elk = out["checks"]["elk_logs"]
     assert elk["ok"] is None and "unavailable" in elk
     assert "elk_logs" in out["unknown"] and "elk_logs" not in out["not_applicable"]
+
+
+def test_a_throttled_dependency_is_not_reported_as_a_missing_backup_method(monkeypatch):
+    """★ 2026-09-03 生产:全网 195 台扫一遍,报「17 台云 RDS 没声明 backup_method」。
+
+    平台对这 114 台云实例全部答的是 not_applicable —— 那 17 台的区别只是问得太快撞了 429。
+    读不到的依赖被当成了确认的缺口:同一个形状,相反的含义。所以依赖不可读时这一项必须是
+    unknown,而且 `ok` 不能为真。
+    """
+    import argparse as _ap
+
+    def throttled(path, params=None):
+        if path == "/dba/backups/coverage":
+            return {"unavailable": True, "path": path, "status_code": 429}
+        if path == "/instances/42":
+            return {"host": "rm-x", "contact_person": "张三",
+                    "database_inventory_coverage": "owns"}
+        if path == "/databases":
+            return {"items": [{"id": 1}], "total": 3}
+        if path == "/instances/42/backups":
+            return {"backup_method": None}
+        if path == "/elk/coverage":
+            return {"instances": [{"id": 42, "covered": False, "applicable": False}]}
+        return {}
+
+    monkeypatch.setattr(client_module, "_try_get", throttled)
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=42))
+
+    assert "backup_method" not in out["missing"], "读不到 ≠ 缺失"
+    assert out["checks"]["backup_method"]["ok"] is None
+    assert out["checks"]["backup_method"]["unavailable"]
+    assert "backup_method" in out["unknown"] and out["unavailable"] == ["backup_method"]
+    assert out["ok"] is False, "答不上来的检查不是一张干净的体检单"
+
+
+def test_cluster_component_ownership_points_at_the_cluster_head(monkeypatch):
+    """一个没有负责人的 TiDB 集群,在组件级展开成 21 条一模一样的「没有负责人」。
+
+    组件的归属属于集群头,和它的备份一样(平台已经把备份判成 not_applicable)。21 条假缺口
+    会把唯一那条能有人去处理的真缺口埋掉。
+    """
+    import argparse as _ap
+
+    responses = {
+        "/instances/100": {"host": "10.101.2.101", "contact_person": None, "cluster_id": 18,
+                           "database_inventory_coverage": "cluster_component"},
+        "/databases": {"items": [], "total": 0},
+        "/instances/100/backups": {"backup_method": None},
+        "/elk/coverage": {"instances": [{"id": 100, "covered": False, "applicable": False,
+                                         "not_applicable_reason": "cluster component"}]},
+        "/dba/backups/coverage": {"items": [
+            {"instance_id": 100, "verdict": "not_applicable",
+             "reasons": ["cluster component: backup is taken at the cluster level"]}]},
+    }
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: responses.get(path))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=100))
+    assert out["missing"] == []
+    assert sorted(out["not_applicable"]) == ["backup_method", "elk_logs", "ownership"]
+    assert "18" in out["checks"]["ownership"]["not_applicable"], "要指向集群头,别只说不适用"
+    # 集群成员的库存归属者持有库,空列表是正确状态
+    assert out["checks"]["database_inventory"]["ok"] is True
+
+
+def test_a_fan_out_says_when_an_answer_was_built_on_an_unreadable_dependency(monkeypatch):
+    """`returned=195, partial=false` 说全都答上了,而中途有依赖被限流没读到。
+
+    每台实例都返回了对象,所以 `failed` 是空的 —— 但其中一部分答案是残的。partial 必须为真。
+    """
+    import argparse as _ap
+
+    calls = {"n": 0}
+
+    def sometimes_throttled(path, params=None):
+        if path == "/dba/backups/coverage":
+            calls["n"] += 1
+            return {"unavailable": True, "path": path, "status_code": 429}
+        if path.startswith("/instances/") and path.endswith("/backups"):
+            return {"backup_method": "rman"}
+        if path.startswith("/instances/"):
+            return {"host": "h", "contact_person": "x", "database_inventory_coverage": "owns"}
+        if path == "/databases":
+            return {"items": [{"id": 1}], "total": 1}
+        if path == "/elk/coverage":
+            return {"instances": [{"id": 7, "covered": True}, {"id": 8, "covered": True}]}
+        return {}
+
+    monkeypatch.setattr(client_module, "_try_get_shared", sometimes_throttled)
+    monkeypatch.setattr(client_module, "_try_get", sometimes_throttled)
+    args = _ap.Namespace(instance_id=None, func=client_module.cmd_onboarding_check)
+    out = client_module._fan_out(args, [7, 8])
+
+    assert out["returned"] == 2 and not out.get("failed")
+    assert out["partial"] is True, "答案是残的就不能说完整"
+    assert out["degraded_instances"] == [7, 8]
+    assert out["items"][0]["degraded"] == [{"check": "backup_method"}]
+
+
+def test_a_fleet_wide_table_is_fetched_once_per_fan_out(monkeypatch):
+    """扇出 195 台时,每台各拉一次全网备份/ELK 覆盖表 = 390 次全网查询,正是它自己撞限流的原因。"""
+    seen = []
+
+    def counting(path, params=None):
+        seen.append(path)
+        return {"items": [], "instances": []}
+
+    monkeypatch.setattr(client_module, "_try_get", counting)
+    for _ in range(5):
+        client_module._try_get_shared("/dba/backups/coverage", {"limit": 2000})
+    assert seen == ["/dba/backups/coverage"], "同一张全网表只拉一次"
+
+    # 失败不进缓存:一次限流不能让整轮扇出都拿着「读不到」
+    seen.clear()
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: (seen.append(path),
+                                                   {"unavailable": True})[1])
+    client_module._try_get_shared("/elk/coverage")
+    client_module._try_get_shared("/elk/coverage")
+    assert len(seen) == 2
+
+
+def test_rate_limited_requests_are_retried_then_reported(monkeypatch):
+    """429 的语义是「什么都没执行」,所以重试是安全的,而放着不重试等于把限流变成结论。"""
+    monkeypatch.setattr(client_module.time, "sleep", lambda _s: None)
+
+    attempts = {"n": 0}
+
+    def flaky(method, path, params=None, body=None):
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise client_module._RateLimited(0)
+        return {"ok": True}
+
+    monkeypatch.setattr(client_module, "_http_call", flaky)
+    assert client_module._request_once("GET", "/instances") == {"ok": True}
+    assert attempts["n"] == 3
+
+    def always(method, path, params=None, body=None):
+        raise client_module._RateLimited(0)
+
+    monkeypatch.setattr(client_module, "_http_call", always)
+    try:
+        client_module._request_once("GET", "/instances")
+    except SystemExit:
+        pass
+    else:  # pragma: no cover - the point of the test
+        raise AssertionError("耗尽配额必须响亮地失败,不能悄悄返回空")
+
+
+def test_retry_after_is_honoured_but_not_obeyed_indefinitely():
+    """服务端说等 5 秒就等 5 秒;说等 10 分钟是让我们放弃,不是让我们挂在那里。"""
+    class _H:
+        def __init__(self, value): self._v = value
+        def get(self, _k): return self._v
+
+    assert client_module._retry_after_seconds(_H("5")) == 5.0
+    assert client_module._retry_after_seconds(_H("600")) == 0.0
+    assert client_module._retry_after_seconds(_H(None)) == 0.0
+    assert client_module._retry_after_seconds(_H("Wed, 21 Oct 2026 07:28:00 GMT")) == 0.0
+    assert client_module._retry_after_seconds(None) == 0.0
+
+
+def test_a_retired_instance_is_not_a_pile_of_onboarding_gaps(monkeypatch):
+    """status=inactive 的实例不在被纳管的过程中,平台的覆盖表也只列 active。
+
+    拿它对着覆盖表判,得到三条谁也关不掉的「缺口」—— 而这份清单的用法就是把它做到零。
+    """
+    import argparse as _ap
+
+    responses = {
+        "/instances/209": {"host": "10.24.97.51", "status": "inactive",
+                           "contact_person": None, "database_inventory_coverage": "owns"},
+        "/databases": {"items": [], "total": 0},
+        "/instances/209/backups": {"backup_method": None},
+        "/elk/coverage": {"instances": [{"id": 209, "covered": False, "applicable": False}]},
+        "/dba/backups/coverage": {"items": []},
+    }
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: responses.get(path))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=209))
+    assert out["missing"] == [] and out["unknown"] == []
+    assert len(out["not_applicable"]) == 4 and out["status"] == "inactive"
+
+
+def test_an_active_instance_absent_from_the_coverage_table_is_unknown(monkeypatch):
+    """表读得到、里面没有这台 —— 这不构成任何证据,不能拿来判「没声明备份方式」。"""
+    import argparse as _ap
+
+    responses = {
+        "/instances/8": {"host": "10.0.0.8", "status": "active", "contact_person": "x",
+                         "database_inventory_coverage": "owns"},
+        "/databases": {"items": [{"id": 1}], "total": 1},
+        "/instances/8/backups": {"backup_method": None},
+        "/elk/coverage": {"instances": [{"id": 8, "covered": True}]},
+        "/dba/backups/coverage": {"items": [{"instance_id": 999, "verdict": "ok"}]},
+    }
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: responses.get(path))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=8))
+    assert out["missing"] == []
+    assert out["unknown"] == ["backup_method"] and out["ok"] is False

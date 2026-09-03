@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta, timezone
 import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -275,6 +276,18 @@ _COUNT_ONLY = False
 # Last HTTP status seen, so the /dba prefix retry fires only for a genuine 404. A 401 is not
 # a path problem: retrying it just emits a second identical failure and buries the first.
 _LAST_HTTP_STATUS: int | None = None
+
+# Parts that could not be read during this run. A composite answer built on an unreadable
+# dependency is not a complete answer, and saying so is the whole difference between
+# "this instance has no owner" and "we could not ask".
+_DEGRADED: list[dict[str, Any]] = []
+# Fleet-wide payloads reused across a fan-out; see _try_get_shared. Entries carry a
+# timestamp: a CLI run lasts seconds, but this module can also be imported by a long-lived
+# host, and a cache with no expiry would keep answering that question with this morning's
+# coverage table. Long enough to cover a fan-out over the whole fleet, short enough that
+# nobody acts on a stale answer.
+_SHARED_CACHE: dict[tuple[str, str], tuple[float, Any]] = {}
+_SHARED_CACHE_TTL_SECONDS = 120.0
 
 
 def _request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
@@ -567,6 +580,7 @@ def _fan_out(args: argparse.Namespace, ids: list[int]) -> dict[str, Any]:
     for instance_id in ids:
         scoped = argparse.Namespace(**vars(args))
         scoped.instance_id = instance_id
+        before = len(_DEGRADED)
         try:
             payload = args.func(scoped)
         except SystemExit as exc:
@@ -576,14 +590,36 @@ def _fan_out(args: argparse.Namespace, ids: list[int]) -> dict[str, Any]:
         except Exception as exc:  # noqa: BLE001 - one instance failing must not end the run
             failed.append({"instance_id": instance_id, "error": _short_reason(exc)})
             continue
-        results.append({"instance_id": instance_id, "result": payload})
+        entry: dict[str, Any] = {"instance_id": instance_id, "result": payload}
+        # The command returned, but possibly on an incomplete reading. Reported here because
+        # `returned` and `failed` both said everything was fine while a throttled dependency
+        # was quietly turning "could not ask" into "confirmed missing". Two signals, because
+        # either alone has a blind spot: the request layer knows which call failed, and the
+        # command knows which of its answers that cost it.
+        degraded_parts: list[dict[str, Any]] = list(_DEGRADED[before:])
+        if isinstance(payload, dict):
+            degraded_parts += [{"check": name} for name in (payload.get("unavailable") or [])]
+        if degraded_parts:
+            entry["degraded"] = degraded_parts
+        results.append(entry)
 
+    degraded = [r for r in results if r.get("degraded")]
     out: dict[str, Any] = {
         "requested": ids,
         "returned": len(results),
         "items": results,
-        "partial": bool(failed),
+        "partial": bool(failed) or bool(degraded),
     }
+    if degraded:
+        out["degraded_instances"] = [r["instance_id"] for r in degraded]
+        sys.stderr.write(json.dumps({
+            "warning": "degraded_result",
+            "message": (
+                f"{len(degraded)} of {len(ids)} instances answered from an incomplete "
+                f"reading (a dependency could not be fetched). Their unanswered checks are "
+                f"reported as `unknown`, not as gaps. See `degraded` on each item."
+            ),
+        }, ensure_ascii=False) + "\n")
     if failed:
         out["failed"] = failed
         sys.stderr.write(json.dumps({
@@ -965,7 +1001,61 @@ def _cell(value: Any) -> str:
     return str(value)
 
 
+class _RateLimited(Exception):
+    """HTTP 429. Carries how long the server asked us to wait, when it said."""
+
+    def __init__(self, delay: float) -> None:
+        super().__init__("rate limited")
+        self.delay = delay
+
+
+# The platform caps reads globally (600/minute) and live-database reads much lower. A wide
+# fan-out therefore *will* be throttled — that is the design working, not a failure — so the
+# client waits instead of handing the caller a hole. Capped low enough that a genuinely
+# exhausted quota still fails loudly rather than hanging.
+_RATE_LIMIT_RETRIES = 4
+_RATE_LIMIT_BASE_DELAY = 1.0
+
+
+def _retry_after_seconds(headers: Any) -> float:
+    """Honour Retry-After when the server sends one; otherwise back off on our own."""
+    raw = None
+    try:
+        raw = headers.get("Retry-After") if headers is not None else None
+    except Exception:  # noqa: BLE001 - a header bag that will not be read is not fatal
+        raw = None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return 0.0
+    # A server asking for minutes is asking us to give up, not to sleep through the session.
+    return value if 0 < value <= 60 else 0.0
+
+
 def _request_once(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
+    """One logical request, retried only for 429."""
+    for attempt in range(_RATE_LIMIT_RETRIES + 1):
+        try:
+            return _http_call(method, path, params=params, body=body)
+        except _RateLimited as limited:
+            if attempt == _RATE_LIMIT_RETRIES:
+                _fail(
+                    "rate_limited",
+                    f"{method} {path} returned HTTP 429 after {attempt + 1} attempts",
+                    status_code=429,
+                    hint="Reads are capped at 600/minute globally and lower for live-database "
+                         "probes. Narrow the fan-out or retry in a minute.",
+                )
+            delay = limited.delay or _RATE_LIMIT_BASE_DELAY * (2 ** attempt)
+            sys.stderr.write(json.dumps({
+                "warning": "rate_limited_retry",
+                "message": f"{method} {path} was rate limited; waiting {delay:.1f}s "
+                           f"(attempt {attempt + 1}/{_RATE_LIMIT_RETRIES}).",
+            }, ensure_ascii=False) + "\n")
+            time.sleep(delay)
+
+
+def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
     base = _base_url()
     token = _api_key()
     query = urllib.parse.urlencode(_clean_params(params or {}))
@@ -1009,6 +1099,14 @@ def _request_once(method: str, path: str, *, params: dict[str, Any] | None = Non
         raw = exc.read().decode("utf-8", errors="replace")
         global _LAST_HTTP_STATUS
         _LAST_HTTP_STATUS = exc.code
+        if exc.code == 429:
+            # Nothing ran: the limiter rejected the request before it reached the handler,
+            # so this is safe to repeat. Retrying here rather than at the call site is the
+            # point — every caller that forgets turns a transient limit into a stated fact,
+            # which is how a fleet-wide onboarding sweep reported 17 cloud instances as
+            # "no backup_method declared" when the platform had answered "not applicable"
+            # for all of them and simply been asked too fast.
+            raise _RateLimited(_retry_after_seconds(exc.headers)) from exc
         extra: dict[str, Any] = {"status_code": exc.code, "response": _redact(raw)}
         if exc.code in (401, 403):
             # "Wrong key" and "wrong directory" produce the same 401. Say which one this is.
@@ -1366,7 +1464,38 @@ def _try_get(path: str, params: dict[str, Any] | None = None) -> Any:
     try:
         return _request_once("GET", path, params=params)
     except SystemExit:
-        return {"unavailable": True, "path": path, "status_code": _LAST_HTTP_STATUS}
+        entry = {"path": path, "status_code": _LAST_HTTP_STATUS}
+        _DEGRADED.append(entry)
+        return {"unavailable": True, **entry}
+
+
+def _unavailable(payload: Any) -> bool:
+    """Did this part fail to load, as opposed to answering "nothing"?
+
+    Every consumer of `_try_get` has to ask this, and the ones that forgot are the reason it
+    exists: an unreadable dependency read as an empty answer, and an empty answer reads as a
+    confirmed gap. Same shape, opposite meaning.
+    """
+    return isinstance(payload, dict) and payload.get("unavailable") is True
+
+
+def _try_get_shared(path: str, params: dict[str, Any] | None = None) -> Any:
+    """A fleet-wide read that is identical for every instance in a fan-out — fetched once.
+
+    `onboarding-check` needs the whole-fleet backup and ELK coverage tables to decide whether
+    a check even applies to this instance. Fetching them per instance made a 195-instance
+    sweep issue 390 fleet-wide queries, which is what pushed it into the rate limit in the
+    first place. Failures are not cached: one throttled call must not poison the rest of the
+    run with a stale "unavailable".
+    """
+    key = (path, json.dumps(params or {}, sort_keys=True))
+    cached = _SHARED_CACHE.get(key)
+    if cached is not None and (time.monotonic() - cached[0]) < _SHARED_CACHE_TTL_SECONDS:
+        return cached[1]
+    payload = _try_get(path, params)
+    if not _unavailable(payload):
+        _SHARED_CACHE[key] = (time.monotonic(), payload)
+    return payload
 
 
 def cmd_instance(args: argparse.Namespace) -> Any:
@@ -1420,19 +1549,28 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
     Metrics start flowing immediately, which is exactly what makes the rest easy to miss:
     databases undiscovered, backup method undeclared, no owner, not shipping logs. Four
     subsystems, four separate answers — this asks all four and says which are missing.
+
+    Each check has four possible outcomes, not two: covered, a real gap, not this instance's
+    job, or unanswerable right now. Collapsing the last two into "missing" is what turned a
+    throttled fleet sweep into 17 fabricated backup gaps on instances the platform had
+    already declared not applicable.
     """
     iid = args.instance_id
     detail = _try_get(f"/instances/{iid}")
     databases = _try_get("/databases", {"instance_id": iid, "limit": 1})
     backups = _try_get(f"/instances/{iid}/backups")
-    elk = _try_get("/elk/coverage")
+    # Fleet-wide tables, shared across a fan-out rather than refetched per instance.
+    elk = _try_get_shared("/elk/coverage")
+    coverage_payload = _try_get_shared("/dba/backups/coverage", {"limit": 2000})
 
+    detail_ok = isinstance(detail, dict) and not _unavailable(detail)
     db_items, db_meta = _envelope(databases)
     db_count = db_meta.get("total") if db_meta else (len(db_items) if db_items else 0)
-    coverage = (detail or {}).get("database_inventory_coverage") if isinstance(detail, dict) else None
+    coverage = detail.get("database_inventory_coverage") if detail_ok else None
     method = (backups or {}).get("backup_method") if isinstance(backups, dict) else None
-    contact = (detail or {}).get("contact_person") if isinstance(detail, dict) else None
-    host = (detail or {}).get("host") if isinstance(detail, dict) else None
+    contact = detail.get("contact_person") if detail_ok else None
+    host = detail.get("host") if detail_ok else None
+    cluster_id = detail.get("cluster_id") if detail_ok else None
 
     # /elk/coverage is a fourth shape again: the rows live under `instances`, each carrying
     # its own `covered` flag. Matching on `items` + host returned an empty set and reported
@@ -1453,7 +1591,8 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
     # that is never green is one people stop reading. The platform already answers both
     # (`applicable` on the ELK row, `not_applicable` as the backup verdict); asking it keeps
     # one definition of the rule instead of a copy here that drifts.
-    coverage_rows, _ = _envelope(_try_get("/dba/backups/coverage", {"limit": 2000}))
+    coverage_rows, _ = _envelope(coverage_payload)
+    coverage_readable = not _unavailable(coverage_payload) and coverage_rows is not None
     backup_row = next(
         (r for r in (coverage_rows or [])
          if isinstance(r, dict) and str(r.get("instance_id")) == str(iid)), None
@@ -1462,33 +1601,88 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
     backup_na_reason = "; ".join((backup_row or {}).get("reasons") or []) or None
     elk_na = elk_row is not None and elk_row.get("applicable") is False
     elk_na_reason = (elk_row or {}).get("not_applicable_reason")
+    # A cluster component's owner is held by the cluster head — the same shape as its backup,
+    # which the platform already calls not applicable. Demanding one per component turned a
+    # single unowned TiDB cluster into 21 identical "no owner" rows, burying the one row that
+    # someone could actually act on.
+    component = coverage == "cluster_component"
 
-    findings = {
-        # An empty list on a cluster member is correct: the owner holds the rows.
-        "database_inventory": {
+    # An instance that is not in service is not being onboarded. The platform's own coverage
+    # tables list active instances only, so judging a retired one against them produced three
+    # "gaps" on a decommissioned host — an item nobody can close, on a checklist people are
+    # meant to work through to zero.
+    status = str(detail.get("status") or "").strip().lower() if detail_ok else ""
+    if status and status != "active":
+        reason = f"instance status={status}: not in service, nothing to onboard"
+        checks = {name: {"ok": None, "not_applicable": reason}
+                  for name in ("database_inventory", "backup_method", "ownership", "elk_logs")}
+        return {
+            "instance_id": iid, "checks": checks, "missing": [],
+            "not_applicable": list(checks), "unknown": [], "unavailable": [],
+            "status": status, "ok": True,
+        }
+
+    findings: dict[str, dict[str, Any]] = {}
+
+    # An empty list on a cluster member is correct: the owner holds the rows.
+    if _unavailable(databases) or not detail_ok:
+        findings["database_inventory"] = {
+            "ok": None, "unavailable": "could not read the instance or its databases"}
+    else:
+        findings["database_inventory"] = {
             "ok": bool(db_count) or coverage in ("cluster_covered", "cluster_component"),
             "databases": db_count, "coverage": coverage,
-        },
-        "backup_method": (
-            {"ok": None, "not_applicable": backup_na_reason or "backups are the provider's"}
-            if backup_na else
-            {"ok": bool(method), "backup_method": method,
-             "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"}
-        ),
-        "ownership": {"ok": bool(contact), "contact_person": contact},
-        # Three states, not two: covered, a real gap, or not this instance's job. Unreadable
-        # coverage is a fourth — say which one it is rather than folding them together.
-        "elk_logs": (
-            {"ok": None, "host": host,
-             "not_applicable": elk_na_reason or "logs are not shipped for this instance kind"}
-            if elk_na else
-            {"ok": bool(elk_row and elk_row.get("covered")), "host": host}
-            if elk_readable
-            else {"ok": None, "host": host, "unavailable": "could not read /elk/coverage"}
-        ),
-    }
+        }
+
+    if not coverage_readable:
+        # Without the coverage table there is no way to know whether this instance's backups
+        # are even ours to declare, so an undeclared method proves nothing.
+        findings["backup_method"] = {
+            "ok": None, "unavailable": "could not read /dba/backups/coverage"}
+    elif backup_na:
+        findings["backup_method"] = {
+            "ok": None, "not_applicable": backup_na_reason or "backups are the provider's"}
+    elif backup_row is None:
+        # Readable table, no row for this instance — that is not evidence of anything.
+        findings["backup_method"] = {
+            "ok": None,
+            "unavailable": "no row in /dba/backups/coverage, so whether backups are this "
+                           "instance's responsibility is unknown"}
+    elif _unavailable(backups):
+        findings["backup_method"] = {
+            "ok": None, "unavailable": f"could not read /instances/{iid}/backups"}
+    else:
+        findings["backup_method"] = {
+            "ok": bool(method), "backup_method": method,
+            "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"}
+
+    if not detail_ok:
+        findings["ownership"] = {"ok": None, "unavailable": f"could not read /instances/{iid}"}
+    elif component:
+        findings["ownership"] = {
+            "ok": None, "cluster_id": cluster_id,
+            "not_applicable": (
+                f"cluster component: the owner is held by cluster head {cluster_id}"
+                if cluster_id is not None else
+                "cluster component: the owner is held by the cluster head"),
+        }
+    else:
+        findings["ownership"] = {"ok": bool(contact), "contact_person": contact}
+
+    # Three states, not two: covered, a real gap, or not this instance's job. Unreadable
+    # coverage is a fourth — say which one it is rather than folding them together.
+    findings["elk_logs"] = (
+        {"ok": None, "host": host,
+         "not_applicable": elk_na_reason or "logs are not shipped for this instance kind"}
+        if elk_na else
+        {"ok": bool(elk_row and elk_row.get("covered")), "host": host}
+        if elk_readable
+        else {"ok": None, "host": host, "unavailable": "could not read /elk/coverage"}
+    )
+
     missing = [name for name, f in findings.items() if f["ok"] is False]
     not_applicable = [name for name, f in findings.items() if f.get("not_applicable")]
+    unavailable = [name for name, f in findings.items() if f.get("unavailable")]
     unknown = [name for name, f in findings.items()
                if f["ok"] is None and name not in not_applicable]
     return {
@@ -1499,6 +1693,7 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
         # A check the platform could not answer is reported apart from one it answered "no":
         # collapsing them would let an outage read as a clean bill of health.
         "unknown": unknown,
+        "unavailable": unavailable,
         "ok": not missing and not unknown,
     }
 
