@@ -496,6 +496,120 @@ def _project(payload: Any, fields: list[str] | None) -> Any:
     return out
 
 
+def _sort_rows(payload: Any, sort_by: str | None, descending: bool) -> Any:
+    """Order a collection by one field, dotted paths included.
+
+    Rows that lack the field sort last in both directions rather than crashing or silently
+    becoming zero — "this row has no size" and "this row is the smallest" are different facts.
+    """
+    if not sort_by:
+        return payload
+    items, meta = _envelope(payload)
+    if items is None:
+        return payload
+    missing = object()
+
+    def key(row: Any):
+        value = _dig(row, sort_by) if isinstance(row, dict) else _MISSING
+        if value is _MISSING or value is None:
+            return (1, 0, "")
+        if isinstance(value, bool):
+            return (0, int(value), "")
+        if isinstance(value, (int, float)):
+            return (0, value, "")
+        return (0, 0, str(value))
+
+    ordered = sorted(items, key=key, reverse=descending)
+    # Rows without the field stay at the end whichever way the rest is sorted.
+    if descending:
+        ordered = [r for r in ordered if key(r)[0] == 0] + [r for r in ordered if key(r)[0] == 1]
+    return _replace_items(payload, ordered, meta)
+
+
+def _group_rows(payload: Any, group_by: str) -> Any:
+    """Count rows per distinct value of one field — the `Counter(...)` written by hand 95 times.
+
+    Returns counts, not the rows: the question "how many of each" does not need the rows, and
+    the ones that do are served by --fields. Rows missing the field are counted under
+    `(missing)` rather than dropped, because a silent shrink in the denominator is how a
+    grouped answer starts lying.
+    """
+    items, _meta = _envelope(payload)
+    if items is None:
+        return payload
+    counts: dict[str, int] = {}
+    for row in items:
+        value = _dig(row, group_by) if isinstance(row, dict) else _MISSING
+        if value is _MISSING:
+            label = "(missing)"
+        elif isinstance(value, list):
+            label = ", ".join(str(v) for v in value) or "(empty)"
+        else:
+            label = "(null)" if value is None else str(value)
+        counts[label] = counts.get(label, 0) + 1
+    # Under `items`, the canonical collection key, so --format table/csv and every other
+    # downstream step treat a grouped result like any other collection instead of falling
+    # back to raw JSON.
+    return {
+        "group_by": group_by,
+        "rows_grouped": len(items),
+        "items": [{"value": k, "count": v}
+                  for k, v in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))],
+    }
+
+
+def _replace_items(payload: Any, rows: list[Any], meta: dict[str, Any]) -> Any:
+    """Put a reordered collection back where it came from, whatever the envelope calls it."""
+    if meta.get("shape") == "list" or not isinstance(payload, dict):
+        return rows
+    for key, value in payload.items():
+        if isinstance(value, list) and len(value) == len(rows):
+            return {**payload, key: rows}
+    return payload
+
+
+def _to_csv(payload: Any) -> str | None:
+    """Render a collection as CSV, or None when it is not tabular.
+
+    `--format table` is for reading and `json` is for programs; the list that has to reach a
+    database owner by mail lands in neither. Columns are the union of the rows' keys, in the
+    order first seen, so a projection with --fields keeps that order.
+    """
+    import csv as _csv
+    import io
+
+    items, _meta = _envelope(payload)
+    if not items or not all(isinstance(row, dict) for row in items):
+        return None
+    columns: list[str] = []
+    for row in items:
+        for key in row:
+            if key not in columns:
+                columns.append(key)
+    buffer = io.StringIO()
+    writer = _csv.DictWriter(buffer, fieldnames=columns, extrasaction="ignore")
+    writer.writeheader()
+    for row in items:
+        writer.writerow({c: _csv_cell(row.get(c)) for c in columns})
+    return buffer.getvalue()
+
+
+def _csv_cell(value: Any) -> str:
+    """A cell a spreadsheet can use.
+
+    `_cell` renders a list as JSON and truncates at 60 characters — right for a terminal
+    table, wrong for a file someone opens in Excel and mails on: ["李太平", "谢涛燕"] should
+    read as a list of names, and a name must not be cut in half at the 60th character.
+    """
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return "; ".join(_csv_cell(v) for v in value)
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    return str(value)
+
+
 def _print_table(payload: Any) -> bool:
     """Render a collection as columns. Returns False when the payload is not tabular."""
     items, _ = _envelope(payload)
@@ -1227,6 +1341,22 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
              f"guard, not the data, is what ended the walk.",
     )
     parser.add_argument(
+        "--group-by", metavar="FIELD",
+        default=(argparse.SUPPRESS if suppress_defaults else None),
+        help="Count rows per distinct value of FIELD (dotted paths allowed). Rows missing the "
+             "field are counted under (missing), never dropped.",
+    )
+    parser.add_argument(
+        "--sort-by", metavar="FIELD",
+        default=(argparse.SUPPRESS if suppress_defaults else None),
+        help="Order rows by FIELD (dotted paths allowed). Rows without it sort last.",
+    )
+    parser.add_argument(
+        "--desc", action="store_true",
+        default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="Sort descending. Only meaningful with --sort-by.",
+    )
+    parser.add_argument(
         "--count-only", action="store_true",
         default=(argparse.SUPPRESS if suppress_defaults else False),
         help="Return the envelope's counts and drop the rows. Answers 'how many' without "
@@ -1238,7 +1368,7 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
              "A full inventory dump is hundreds of KB; four columns is usually the answer.",
     )
     parser.add_argument(
-        "--format", choices=["json", "table"],
+        "--format", choices=["json", "table", "csv"],
         default=(argparse.SUPPRESS if suppress_defaults else "json"),
     )
 
@@ -1572,8 +1702,21 @@ def main(argv: list[str] | None = None) -> int:
     payload = args.func(args)
     if _COUNT_ONLY:
         payload = _counts_only(payload)
+    payload = _sort_rows(payload, getattr(args, "sort_by", None), bool(getattr(args, "desc", False)))
     payload = _project(payload, _split_fields(getattr(args, "fields", None)))
-    if getattr(args, "format", "json") == "table" and _print_table(payload):
+    group_by = getattr(args, "group_by", None)
+    if group_by:
+        # After --fields, so a projection can narrow what is grouped; the grouped result is
+        # counts, so table/csv render it the same as any other collection.
+        payload = _group_rows(payload, group_by)
+    fmt = getattr(args, "format", "json")
+    if fmt == "csv":
+        rendered = _to_csv(payload)
+        if rendered is None:
+            _fail("not_tabular", "--format csv needs a collection; this response is a single object")
+        sys.stdout.write(rendered)
+        return 0
+    if fmt == "table" and _print_table(payload):
         return 0
     _print_json(payload)
     return 0

@@ -260,6 +260,23 @@ assuming `items`. Note `probe-catalog` keys its entries by `probe`, not `name` o
 Frequently useful paths that have **no** helper — reach them with `get`:
 `/dba/fleet/metric-names` (metric vocabulary), `/dba/fleet/metrics` (one metric across the fleet), `/dba/fleet/health` (fleet health scores), `/observability/main-chain` (is collection→alerting→AI flowing), `/observability/version` (which release is answering — the only way to tell whether this document is stale), `/ai/observability` (is AI analysis succeeding), `/ai/rag/status` (is knowledge retrieval available), `/data-quality` (fleet-wide metric trustworthiness, paged: read `total` and `truncated`), `/clusters` (cluster membership — the direct way to find which primary a standby belongs to), `/ai/diagnosis-quality` (AI diagnosis accuracy), `/reports/inspection` (inspection reports), `/cloud-rds/downsizing-plans` (plans already acted on, not just candidates), `/alert-silences` and `/log-alert-rules` (silences and log-alert rules).
 
+### Getting to a conclusion, not just to the data
+
+`--fields` narrows, and these finish the job — they exist because more than half of this
+skill's calls used to be followed by a hand-written `python3 -c` doing the same two things:
+
+```
+--group-by verdict            # counts per distinct value; dotted paths work (local.sync_stale)
+--sort-by size_gb --desc      # order by one field; rows without it sort last, both directions
+--format csv                  # a file to send someone, not a table to read
+--count-only                  # the totals without the rows
+```
+
+`--group-by` counts rows missing the field under `(missing)` rather than dropping them: a
+grouped answer whose denominator quietly shrank is worse than no grouping. `--sort-by` keeps
+rows without the field at the end in both directions — "no value" and "smallest value" are
+different facts.
+
 ### Credentials, and running on Windows
 
 The client reads `PROJECT_API_BASE_URL` / `PROJECT_API_KEY` from, in order of precedence:

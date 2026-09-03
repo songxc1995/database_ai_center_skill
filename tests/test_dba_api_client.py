@@ -816,3 +816,53 @@ def test_count_only_does_not_argue_against_what_the_caller_asked_for(monkeypatch
         {"items": [{"id": 1}], "total": 84728, "truncated": True}, "/data-quality"
     )
     assert "partial_result" in capsys.readouterr().err
+
+
+def test_group_by_counts_missing_rows_instead_of_dropping_them():
+    """分组时把缺字段的行悄悄丢掉,会让分母无声变小 —— 分组结果开始说谎正是从这里开始。"""
+    payload = {"items": [
+        {"verdict": "ok"}, {"verdict": "ok"}, {"verdict": "at_risk"},
+        {"no_verdict_here": 1}, {"verdict": None},
+    ]}
+    out = client_module._group_rows(payload, "verdict")
+    counts = {g["value"]: g["count"] for g in out["items"]}
+    assert counts == {"ok": 2, "at_risk": 1, "(missing)": 1, "(null)": 1}
+    assert out["rows_grouped"] == 5 == sum(counts.values()), "每一行都必须被算进去"
+
+
+def test_group_by_reads_dotted_paths():
+    out = client_module._group_rows(
+        {"items": [{"local": {"sync_stale": True}}, {"local": {"sync_stale": False}},
+                   {"local": {"sync_stale": True}}]},
+        "local.sync_stale")
+    assert {g["value"]: g["count"] for g in out["items"]} == {"True": 2, "False": 1}
+
+
+def test_sort_by_puts_rows_without_the_field_last_in_both_directions():
+    """「这一行没有这个值」和「这一行是最小的」是两件事。缺字段当 0 处理会把它排到榜首或
+    榜尾,读者据此下结论 —— 所以两个方向都让它沉底。"""
+    rows = [{"n": 5}, {"other": 1}, {"n": 20}, {"n": None}]
+    asc = client_module._sort_rows({"items": rows}, "n", False)["items"]
+    desc = client_module._sort_rows({"items": rows}, "n", True)["items"]
+    assert [r.get("n") for r in asc][:2] == [5, 20]
+    assert [r.get("n") for r in desc][:2] == [20, 5]
+    for out in (asc, desc):
+        assert all("n" not in r or r["n"] is None for r in out[2:]), "缺值的行留在末尾"
+
+
+def test_csv_is_written_for_a_spreadsheet_not_a_terminal():
+    """--format table 截断到 60 字符、把列表渲染成 JSON —— 终端里对,发给负责人的文件里不对:
+    名字不能在第 60 个字符处被切断。"""
+    csv_text = client_module._to_csv({"items": [
+        {"id": 9, "owners": ["李太平", "谢涛燕"], "note": None},
+        {"id": 27, "owners": [], "note": "x" * 80},
+    ]})
+    lines = csv_text.strip().splitlines()
+    assert lines[0] == "id,owners,note"
+    assert "李太平; 谢涛燕" in lines[1]
+    assert lines[1].endswith(",")           # None → 空单元格
+    assert "x" * 80 in lines[2], "不截断"
+
+
+def test_csv_refuses_a_single_object_instead_of_inventing_a_table():
+    assert client_module._to_csv({"version": "3.57.0", "uptime_seconds": 1}) is None
