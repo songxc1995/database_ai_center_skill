@@ -755,3 +755,44 @@ def test_provenance_names_the_config_file_but_never_the_key(monkeypatch, tmp_pat
     assert prov["user_config"]["exists"] is True
     assert prov["per_key_source"]["PROJECT_API_KEY"] == str(config)
     assert "secret-from-file" not in json.dumps(prov, ensure_ascii=False)
+
+
+def test_all_says_so_when_the_page_guard_stopped_it(monkeypatch, capsys):
+    """--all 撞到分页保护时必须报 partial_result。
+
+    此前它直接 return,绕过了截断警告 —— 于是「拿到 10200/84715 行、stderr 空的」。这比
+    普通截断更危险:不加 --all 时调用方至少知道自己只看了一页,加了 --all 是承诺走到底然后
+    默默停在 12%。_fetch_all 的注释自己写着「a partial answer that says it is partial」。
+    """
+    monkeypatch.setattr(client_module, "_FETCH_ALL", True)
+    monkeypatch.setattr(client_module, "_MAX_PAGES", 2)
+
+    pages = {"n": 0}
+
+    def fake_once(method, path, params=None, body=None):
+        pages["n"] += 1
+        offset = int((params or {}).get("offset") or 0)
+        return {"items": [{"id": offset + i} for i in range(2)],
+                "total": 100, "limit": 2, "offset": offset}
+
+    monkeypatch.setattr(client_module, "_request_once", fake_once)
+    payload = client_module._request("GET", "/data-quality", params={})
+
+    assert len(payload["items"]) == 6, "首页 + 2 页保护上限"
+    err = capsys.readouterr().err
+    assert "partial_result" in err
+    assert "6 of 100" in err
+    # 建议必须对得上调用方已经做过的事 —— 对已经加了 --all 的人说「re-run with --all」,
+    # 正是训练人忽略警告的方式。
+    assert "--max-pages" in err and "re-run with --all" not in err
+
+
+def test_count_only_drops_the_rows_but_keeps_the_counts(monkeypatch):
+    """「有多少条」不该为了回答而把 85128 行拖进上下文。"""
+    monkeypatch.setattr(client_module, "_COUNT_ONLY", True)
+    out = client_module._counts_only(
+        {"items": [{"id": 1}, {"id": 2}], "total": 85128, "truncated": True, "limit": 200}
+    )
+    assert "items" not in out
+    assert out["total"] == 85128 and out["truncated"] is True
+    assert out["returned_rows"] == 2 and out["rows_omitted_by"] == "--count-only"

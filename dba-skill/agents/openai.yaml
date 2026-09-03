@@ -1,4 +1,0 @@
-interface:
-  display_name: "DBA Skill"
-  short_description: "Query live contacts, active alerts, DBA inventory, ownership, and diagnostics"
-  default_prompt: "Use $dba-skill to answer live Database AI Center questions about database contacts, current active alerts, DBA inventory, ownership, unused databases, alert evidence, freshness, and allowlisted diagnostics."

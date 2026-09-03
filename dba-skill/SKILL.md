@@ -1,6 +1,6 @@
 ---
 name: dba-skill
-description: Query Database AI Center v2.19+ live DBA APIs for current/active alerts（现在有哪些告警）, database contacts（数据库联系人有哪些）, estate statistics, unused databases, ownership lookups, alert evidence, freshness, allowlisted diagnostics（含 live 探针下钻 probe-catalog/probe-run）, read-only PromQL against a TiDB cluster's Prometheus（prometheus-query：热点/黄金信号/per-store 流量, v2.63+）, ES/ELK database logs（elk-status/elk-coverage/elk-search：按主机+时间+级别+关键词检索 DB 日志, v2.24+）, cloud RDS data（cloud-rightsizing/cloud-cost-history：右规候选/成本, v2.74+）, backup evidence（backups：backup_method + determination「到底有没有备份」判定, v2.98+）, the knowledge base（历史根因/处理方案与运维手册检索, v2.32+）, and the self-describing read-endpoint catalog（ai-endpoints）for drilling into the long tail of model-reachable read APIs. Use when the agent needs DBA-ready facts or analysis from Database AI Center, optionally enriching host-side evidence with zabbix-readonly.
+description: Live read-only DBA facts and analysis from Database AI Center — alerts, backups, ownership and contacts, inventory, cloud RDS cost, ELK logs, the knowledge base, and allowlisted live diagnostics against the database itself. Use when a question needs current data about the database estate rather than a guess; the server's own catalogues (ai-endpoints, probe-catalog) say what this particular deployment can do.
 ---
 
 # DBA Skill
@@ -21,7 +21,7 @@ questions: a flat list with instance name/host/type inlined and the triggering
 right now". The older `alerts-list` hits the paginated UI endpoint and hands back the raw
 evidence blob including the platform's internal `_dac_*` bookkeeping fields — prefer `alerts`.
 
-Use `zabbix-readonly` only as supporting host evidence when Database AI Center data is insufficient for CPU, memory, disk, filesystem, load, or I/O questions.
+If `zabbix-readonly` is installed, use it only as supporting host evidence when Database AI Center data is insufficient for CPU, memory, disk, filesystem, load, or I/O questions. It ships separately — do not assume it is there.
 
 ## Reading the data honestly (v3.32+)
 
@@ -110,32 +110,32 @@ The helper auto-loads allowlisted `PROJECT_*` values from the nearest `.env` in 
 Prefer the bundled helper when local script execution is available:
 
 ```bash
-python3 scripts/dba_api_client.py inventory-summary
-python3 scripts/dba_api_client.py classification --type oracle
-python3 scripts/dba_api_client.py directory-options --type contact --limit 20
-python3 scripts/dba_api_client.py alerts-list --status active --page-size 20
-python3 scripts/dba_api_client.py databases-search --business Payments --contact Alice
-python3 scripts/dba_api_client.py context --alert-id 5
-python3 scripts/dba_api_client.py diagnostics-catalog --instance-id 12
-python3 scripts/dba_api_client.py diagnostics-run --instance-id 12 --checks database_sizes,storage
-python3 scripts/dba_api_client.py probe-catalog --instance-id 12
-python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
-python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
-python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
-python3 scripts/dba_api_client.py probe-run --instance-id 12 --probe full_join_statements
-python3 scripts/dba_api_client.py prometheus-query --instance-id 8 --query 'count(pd_hotspot_status{type="hot_write_region_as_leader"} > 0)'
-python3 scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
-python3 scripts/dba_api_client.py kb-search --keyword ORA-00060 --sort recency
-python3 scripts/dba_api_client.py kb-incidents --root-cause-key "<root_cause_key from kb-search>"
-python3 scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
-python3 scripts/dba_api_client.py ai-endpoints
-python3 scripts/dba_api_client.py get /dashboard/trends --param hours=6 --param bucket_minutes=15
-python3 scripts/dba_api_client.py elk-status
-python3 scripts/dba_api_client.py elk-coverage
-python3 scripts/dba_api_client.py elk-search --host-ip 10.101.240.83 --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
-python3 scripts/dba_api_client.py cloud-rightsizing --window-days 30 --vendor huawei
-python3 scripts/dba_api_client.py cloud-cost-history
-python3 scripts/dba_api_client.py backups --instance-id 12
+python scripts/dba_api_client.py inventory-summary
+python scripts/dba_api_client.py classification --type oracle
+python scripts/dba_api_client.py directory-options --type contact --limit 20
+python scripts/dba_api_client.py alerts-list --status active --page-size 20
+python scripts/dba_api_client.py databases-search --business Payments --contact Alice
+python scripts/dba_api_client.py context --alert-id 5
+python scripts/dba_api_client.py diagnostics-catalog --instance-id 12
+python scripts/dba_api_client.py diagnostics-run --instance-id 12 --checks database_sizes,storage
+python scripts/dba_api_client.py probe-catalog --instance-id 12
+python scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
+python scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
+python scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
+python scripts/dba_api_client.py probe-run --instance-id 12 --probe full_join_statements
+python scripts/dba_api_client.py prometheus-query --instance-id 8 --query 'count(pd_hotspot_status{type="hot_write_region_as_leader"} > 0)'
+python scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
+python scripts/dba_api_client.py kb-search --keyword ORA-00060 --sort recency
+python scripts/dba_api_client.py kb-incidents --root-cause-key "<root_cause_key from kb-search>"
+python scripts/dba_api_client.py kb-doc-search --q "standby failover runbook"
+python scripts/dba_api_client.py ai-endpoints
+python scripts/dba_api_client.py get /dashboard/trends --param hours=6 --param bucket_minutes=15
+python scripts/dba_api_client.py elk-status
+python scripts/dba_api_client.py elk-coverage
+python scripts/dba_api_client.py elk-search --host-ip 10.101.240.83 --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
+python scripts/dba_api_client.py cloud-rightsizing --window-days 30 --vendor huawei
+python scripts/dba_api_client.py cloud-cost-history
+python scripts/dba_api_client.py backups --instance-id 12
 ```
 
 The helper prints JSON to stdout. It prints structured JSON errors to stderr and never prints the API key.
@@ -285,8 +285,10 @@ If a call fails with 401/403, the error carries `per_key_source` — which file 
 from. "The key was revoked" and "you are reading the wrong file" produce the same status code;
 that field is how you tell them apart. It never contains the key itself.
 
-**Windows:** the examples below say `python3`; use `python` instead — the python.org installer
-provides `python.exe` and `py.exe`, not `python3`.
+**Interpreter:** the examples say `python`, which is what exists on Windows — the python.org
+installer provides `python.exe` and `py.exe`, not `python3`. On a POSIX box where `python` is
+missing or points at Python 2, use `python3`. The examples name the case that breaks silently:
+a model copies the example, not the caveat next to it.
 
 ### "Does this instance have a backup?" has three vocabularies
 

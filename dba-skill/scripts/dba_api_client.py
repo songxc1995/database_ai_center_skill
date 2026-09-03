@@ -262,6 +262,11 @@ def _positive_int(raw: str) -> int:
 # Set from --all. A partial page and a complete one look identical, so opting into the whole
 # answer has to be one flag, not a paging loop the caller has to write correctly every time.
 _FETCH_ALL = False
+# Pages --all will follow before giving up. A guard against an endpoint that never advances,
+# not a preference — but it was invisible: not in SKILL.md, not in --help, only in the source,
+# so hitting it looked like "that is all the data there is".
+_MAX_PAGES = 50
+_COUNT_ONLY = False
 
 # Last HTTP status seen, so the /dba prefix retry fires only for a genuine 404. A 401 is not
 # a path problem: retrying it just emits a second identical failure and buries the first.
@@ -271,7 +276,12 @@ _LAST_HTTP_STATUS: int | None = None
 def _request(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
     """Every call goes through here: pages when asked, and always says when a page is partial."""
     if method == "GET" and _FETCH_ALL:
-        return _fetch_all(method, path, dict(params or {}))
+        payload = _fetch_all(method, path, dict(params or {}))
+        # Same warning as the single-page path. Skipping it here was worse than not having it:
+        # without --all the caller at least knows they asked for one page, while --all promises
+        # to follow pagination to the end and then quietly stopped at 12% of the rows.
+        _warn_if_truncated(payload, path)
+        return payload
     payload = _request_once(method, path, params=params, body=body)
     if method == "GET":
         _warn_if_truncated(payload, path)
@@ -315,13 +325,23 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
         return
     total = meta.get("total")
     if meta.get("truncated") is True or (isinstance(total, int) and total > len(items)):
+        # The advice has to match what the caller already did. Telling someone who passed
+        # --all to "re-run with --all" is how a warning trains people to ignore warnings.
+        if _FETCH_ALL:
+            advice = (
+                f"--all stopped at the {_MAX_PAGES}-page guard. Raise it with "
+                f"--max-pages N, ask for bigger pages with --param limit=1000, or narrow "
+                f"the query. Use --count-only when you just need the total."
+            )
+        else:
+            advice = "re-run with --all, or page with offset/page."
         sys.stderr.write(
             json.dumps(
                 {
                     "warning": "partial_result",
                     "message": (
                         f"{path} returned {len(items)} of {total} rows. This page is NOT the "
-                        f"whole answer — re-run with --all, or page with offset/page."
+                        f"whole answer — {advice}"
                     ),
                     "returned": len(items),
                     "total": total,
@@ -332,13 +352,18 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
         )
 
 
-def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: int = 50) -> Any:
+def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: int | None = None) -> Any:
     """Follow pagination to the end, for both vocabularies the platform uses.
 
     ``page_limit`` is a guard, not a preference: an endpoint that never advances would
     otherwise loop forever, and a silent infinite loop is worse than a partial answer that
-    says it is partial.
+    says it is partial — which is exactly what this used to do. The guard tripped at 50 pages
+    and returned 10,200 of 84,715 rows with an empty stderr, because ``--all`` returned before
+    reaching the truncation warning. Saying "partial" is the whole point of stopping this way,
+    so the caller now hears it, and ``--max-pages`` raises the ceiling when more is wanted.
     """
+    if page_limit is None:
+        page_limit = _MAX_PAGES
     first = _request_once(method, path, params=dict(params))
     items, meta = _envelope(first)
     if items is None or meta.get("shape") != "envelope":
@@ -396,6 +421,26 @@ def _dig(row: Any, path: str) -> Any:
             return _MISSING
         current = current[part]
     return current
+
+
+def _counts_only(payload: Any) -> Any:
+    """The envelope without its rows.
+
+    "How many data-quality findings are there" should not cost 84,715 rows through the context
+    window to answer. Everything except the collection is kept, so `total`, `truncated` and any
+    per-verdict counts still come back.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    items, meta = _envelope(payload)
+    if items is None:
+        return payload
+    # Any list is a collection here; dropping them all covers every envelope vocabulary
+    # (items / instances / events / probes / entries / results / hits) without naming them.
+    out = {key: value for key, value in payload.items() if not isinstance(value, list)}
+    out["returned_rows"] = len(items)
+    out["rows_omitted_by"] = "--count-only"
+    return out
 
 
 def _project(payload: Any, fields: list[str] | None) -> Any:
@@ -619,6 +664,39 @@ def cmd_alerts(args: argparse.Namespace) -> Any:
             "limit": args.limit,
         },
     )
+
+
+def _short_reason(exc: BaseException) -> str:
+    """Why a side call failed, short enough to sit inside another answer."""
+    text = str(exc).strip() or exc.__class__.__name__
+    return text[:160]
+
+
+def cmd_whoami(args: argparse.Namespace) -> Any:
+    """Identity, reach, limits and platform health — the four things to know before trusting
+    an answer, in one call instead of three nobody thinks to make.
+
+    A new user's first failure is almost never the question they asked: it is a key that
+    expired, a role that cannot reach the endpoint, a rate limit they walked into, or a
+    platform that is itself in a bad state. Each of those has its own endpoint; none of them
+    is the one a person reaches for.
+    """
+    out: dict[str, Any] = {"credentials": _credential_provenance()}
+    try:
+        out["identity"] = _request("GET", "/auth/verify")
+    except SystemExit:
+        raise
+    for label, path in (("platform", "/observability/version"),
+                        ("self_check", "/observability/self-check")):
+        try:
+            payload = _request_once("GET", path)
+        except Exception as exc:  # noqa: BLE001 - a partial answer beats no answer here
+            out[label] = {"unavailable": _short_reason(exc)}
+            continue
+        if label == "self_check" and isinstance(payload, dict):
+            payload = {k: v for k, v in payload.items() if k != "results"}
+        out[label] = payload
+    return out
 
 
 def cmd_self_check(args: argparse.Namespace) -> Any:
@@ -1135,7 +1213,20 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
     parser.add_argument(
         "--all", action="store_true", default=(argparse.SUPPRESS if suppress_defaults else False),
         help="Follow pagination to the end. Without it a large collection returns one page, "
-             "and a partial page is shaped exactly like a complete one.",
+             "and a partial page is shaped exactly like a complete one. Stops after "
+             "--max-pages pages and says so on stderr.",
+    )
+    parser.add_argument(
+        "--max-pages", type=_positive_int,
+        default=(argparse.SUPPRESS if suppress_defaults else _MAX_PAGES),
+        help=f"How many pages --all may follow (default {_MAX_PAGES}). Raise it when the "
+             f"guard, not the data, is what ended the walk.",
+    )
+    parser.add_argument(
+        "--count-only", action="store_true",
+        default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="Return the envelope's counts and drop the rows. Answers 'how many' without "
+             "pulling a large collection through the context window.",
     )
     parser.add_argument(
         "--fields", default=default,
@@ -1220,6 +1311,13 @@ def build_parser() -> argparse.ArgumentParser:
     bcov.add_argument("--environment")
     bcov.add_argument("--limit", type=_positive_int, default=500)
     bcov.set_defaults(func=cmd_backups_coverage)
+
+    who = sub.add_parser(
+        "whoami",
+        help="Identity + expiry + rate limits + platform health — run this first when "
+             "something is not working",
+    )
+    who.set_defaults(func=cmd_whoami)
 
     selfchk = sub.add_parser(
         "self-check",
@@ -1463,9 +1561,13 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    global _FETCH_ALL
+    global _FETCH_ALL, _MAX_PAGES, _COUNT_ONLY
     _FETCH_ALL = bool(getattr(args, "all", False))
+    _MAX_PAGES = int(getattr(args, "max_pages", None) or _MAX_PAGES)
+    _COUNT_ONLY = bool(getattr(args, "count_only", False))
     payload = args.func(args)
+    if _COUNT_ONLY:
+        payload = _counts_only(payload)
     payload = _project(payload, _split_fields(getattr(args, "fields", None)))
     if getattr(args, "format", "json") == "table" and _print_table(payload):
         return 0
