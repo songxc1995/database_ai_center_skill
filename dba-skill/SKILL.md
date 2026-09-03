@@ -277,6 +277,37 @@ grouped answer whose denominator quietly shrank is worse than no grouping. `--so
 rows without the field at the end in both directions — "no value" and "smallest value" are
 different facts.
 
+### "What changed since last time?"
+
+Every other command answers "how is it right now". This one answers the question a DBA
+actually asks each morning — which instances lost their backup since yesterday, which alerts
+are new rather than still-unhandled:
+
+```
+python scripts/dba_api_client.py --snapshot backups-coverage --verdict all   # take a baseline
+python scripts/dba_api_client.py --since yesterday backups-coverage --verdict all
+```
+
+Snapshots live in `~/.dba-skill/snapshots`, keyed by the command and its parameters — two
+different questions are never diffed against each other. `--since` takes `last`, `yesterday`,
+`today`, `6h`, `3d`, or an ISO timestamp.
+
+Three things it deliberately does:
+
+- **Refuses to run when there is no baseline.** An empty diff and "nothing to compare with"
+  must not look alike; the error says to take a snapshot first.
+- **Ignores clock-derived fields** (`sync_age_seconds`, `generated_at`, …) and lists which
+  ones. Without that, two runs seconds apart reported 48 changed rows, all of them an age
+  counter ticking.
+- **Flags changes that may be the platform, not the estate.** When the release differs between
+  the two snapshots and a row changed only in fields the platform computes (`verdict`,
+  `determination`, …), it says so. Production really did move three instances between
+  `at_risk`, `suppressed` and `cluster_covered` in five hours — because a release changed how
+  the verdict is computed, not because anything happened to those databases.
+
+Rows are matched by identity (`instance_id`, `id`, …), never by position. Rows with no
+identity are counted under `uncomparable_rows` rather than paired up by where they sat.
+
 ### Credentials, and running on Windows
 
 The client reads `PROJECT_API_BASE_URL` / `PROJECT_API_KEY` from, in order of precedence:

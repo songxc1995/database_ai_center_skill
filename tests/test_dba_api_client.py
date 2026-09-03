@@ -866,3 +866,58 @@ def test_csv_is_written_for_a_spreadsheet_not_a_terminal():
 
 def test_csv_refuses_a_single_object_instead_of_inventing_a_table():
     assert client_module._to_csv({"version": "3.57.0", "uptime_seconds": 1}) is None
+
+
+def test_diff_finds_real_changes_and_ignores_the_clock():
+    """两次相隔几秒的调用曾报出 48 行「变化」,全是 sync_age_seconds 在逐秒递增 —— 噪声
+    把真正出事的那几行埋掉了。时钟派生字段按名忽略,并在结果里列出忽略了哪些:
+    悄悄跳过字段,是 diff 以遗漏的方式说谎。
+    """
+    before = {"items": [
+        {"instance_id": 9, "verdict": "suppressed", "local": {"sync_age_seconds": 100.0}},
+        {"instance_id": 14, "verdict": "at_risk", "local": {"sync_age_seconds": 100.0}},
+        {"instance_id": 99, "verdict": "ok"},
+    ]}
+    after = {"items": [
+        {"instance_id": 9, "verdict": "at_risk", "local": {"sync_age_seconds": 999.0}},
+        {"instance_id": 14, "verdict": "at_risk", "local": {"sync_age_seconds": 999.0}},
+        {"instance_id": 208, "verdict": "not_applicable"},
+    ]}
+    d = client_module._diff_payloads(before, after)
+
+    assert [r["instance_id"] for r in d["added"]] == [208]
+    assert [r["instance_id"] for r in d["removed"]] == [99]
+    assert [c["identity"] for c in d["changed"]] == ["instance_id=9"], "只有真变的那行"
+    assert d["changed"][0]["fields"]["verdict"] == {"from": "suppressed", "to": "at_risk"}
+    assert d["unchanged"] == 1
+    assert "sync_age_seconds" in d["ignored_fields"]
+
+
+def test_diff_says_when_a_release_may_have_moved_the_verdict_rather_than_the_estate():
+    """生产实况:同一查询相隔 5 小时,三台实例判定变了 —— 数据没变,是我发版改了判定逻辑。
+
+    把这两种变化报成一样,读者会开始跳过这份 diff,而那正是这个功能存在的理由。
+    """
+    before = {"items": [{"instance_id": 97, "verdict": "at_risk"}]}
+    after = {"items": [{"instance_id": 97, "verdict": "not_applicable"}]}
+    d = client_module._annotate_judgement_changes(
+        client_module._diff_payloads(before, after), "3.50.0", "3.50.1")
+
+    assert d["platform_version_changed"] == "3.50.0 → 3.50.1"
+    assert d["possibly_judgement_not_estate"] == ["instance_id=97"]
+    assert "redefined" in d["note"]
+
+    # 同版本之间的变化不该被这样开脱
+    same = client_module._annotate_judgement_changes(
+        client_module._diff_payloads(before, after), "3.50.1", "3.50.1")
+    assert "possibly_judgement_not_estate" not in same
+
+
+def test_rows_without_an_identity_are_reported_not_paired_by_position():
+    """按位置配对会凭空造出「变化」。没有身份就说没有身份。"""
+    d = client_module._diff_payloads(
+        {"items": [{"note": "a"}, {"note": "b"}]},
+        {"items": [{"note": "b"}, {"note": "a"}]},
+    )
+    assert d["uncomparable_rows"] == 4
+    assert d["added"] == [] and d["removed"] == [] and d["changed"] == []

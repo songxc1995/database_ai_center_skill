@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timedelta, timezone
 import os
 import sys
 import urllib.error
@@ -494,6 +495,224 @@ def _project(payload: Any, fields: list[str] | None) -> Any:
     out = {key: value for key, value in payload.items() if key != "items"}
     out["items"] = picked
     return out
+
+
+SNAPSHOT_DIR_PARTS = (".dba-skill", "snapshots")
+# Fields whose change is almost always the platform re-deciding rather than the estate moving.
+# Not hidden — labelled, so a reader can tell "this database lost its backup" from "we changed
+# how backups are judged".
+_JUDGEMENT_FIELDS = frozenset({"verdict", "underlying_verdict", "determination", "status",
+                               "grade", "severity", "applicable", "suppressed_by"})
+# Values derived from "now", which therefore differ on every single call. Two runs seconds
+# apart reported 48 changed rows, all of them an age counter ticking — noise that buries the
+# handful of rows something actually happened to. Dropped by name, and the diff says which
+# names were dropped: silently ignoring fields is how a diff starts lying by omission.
+_VOLATILE_FIELDS = frozenset({
+    "generated_at", "current_at", "uptime_seconds", "started_at", "trace_id",
+    "sync_age_seconds", "age_seconds", "seconds_since", "last_seen_seconds_ago",
+})
+
+
+def _strip_volatile(value: Any) -> Any:
+    """A row with its clock-derived fields removed, at any depth."""
+    if isinstance(value, dict):
+        return {k: _strip_volatile(v) for k, v in value.items() if k not in _VOLATILE_FIELDS}
+    if isinstance(value, list):
+        return [_strip_volatile(v) for v in value]
+    return value
+
+
+def _platform_version() -> str | None:
+    """Which release answered, so a diff can tell a redefinition from a real change."""
+    try:
+        payload = _request_once("GET", "/observability/version")
+    except Exception:  # noqa: BLE001 - version is context, never the answer itself
+        return None
+    return str(payload.get("version")) if isinstance(payload, dict) else None
+
+
+def _snapshot_dir() -> Path | None:
+    try:
+        return Path.home().joinpath(*SNAPSHOT_DIR_PARTS)
+    except (OSError, RuntimeError):
+        return None
+
+
+def _snapshot_fingerprint(argv: list[str]) -> str:
+    """Which question this snapshot answers.
+
+    Diffing two different questions produces confident nonsense, so a snapshot is only ever
+    compared with one taken by the same command and parameters. Output-shaping flags are
+    excluded — --fields or --format change the rendering, not the question.
+    """
+    import hashlib
+
+    skip_with_value = {"--fields", "--format", "--sort-by", "--group-by", "--since",
+                       "--max-pages"}
+    skip_flags = {"--snapshot", "--desc", "--count-only", "--all"}
+    parts, i = [], 0
+    while i < len(argv):
+        token = argv[i]
+        if token in skip_with_value:
+            i += 2
+            continue
+        if token in skip_flags or token.split("=", 1)[0] in skip_with_value:
+            i += 1
+            continue
+        parts.append(token)
+        i += 1
+    return hashlib.sha256(" ".join(parts).encode("utf-8")).hexdigest()[:16]
+
+
+def _row_identity(row: Any) -> str | None:
+    """A stable name for one row, or None when it has none.
+
+    Without an identity two collections can only be compared by size, which answers "how many"
+    and never "which". Rows with no id are reported as uncomparable rather than matched by
+    position — position is not identity, and pretending it is manufactures changes.
+    """
+    if not isinstance(row, dict):
+        return None
+    for key in ("instance_id", "id", "alert_id", "database_id", "instance_name", "value"):
+        if row.get(key) is not None:
+            return f"{key}={row[key]}"
+    return None
+
+
+def _write_snapshot(payload: Any, argv: list[str], platform_version: str | None) -> str | None:
+    directory = _snapshot_dir()
+    if directory is None:
+        return None
+    directory = directory / _snapshot_fingerprint(argv)
+    directory.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = directory / f"{stamp}.json"
+    path.write_text(json.dumps({
+        "taken_at": datetime.now(timezone.utc).isoformat(),
+        "command": argv,
+        "platform_version": platform_version,
+        "payload": payload,
+    }, ensure_ascii=False), encoding="utf-8")
+    return str(path)
+
+
+def _parse_since(value: str) -> datetime | None:
+    """`last`, `yesterday`, `3d`, `6h`, or an ISO timestamp."""
+    text = value.strip().lower()
+    now = datetime.now(timezone.utc)
+    if text in ("last", "previous"):
+        return now
+    if text == "yesterday":
+        return now - timedelta(days=1)
+    if text == "today":
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if text.endswith("h") and text[:-1].isdigit():
+        return now - timedelta(hours=int(text[:-1]))
+    if text.endswith("d") and text[:-1].isdigit():
+        return now - timedelta(days=int(text[:-1]))
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _load_snapshot(argv: list[str], since: datetime) -> dict[str, Any] | None:
+    """The newest snapshot at or before `since`, for this exact question."""
+    directory = _snapshot_dir()
+    if directory is None:
+        return None
+    directory = directory / _snapshot_fingerprint(argv)
+    if not directory.is_dir():
+        return None
+    best: tuple[datetime, dict[str, Any]] | None = None
+    for path in directory.glob("*.json"):
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            taken = datetime.fromisoformat(str(data.get("taken_at")))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if taken.tzinfo is None:
+            taken = taken.replace(tzinfo=timezone.utc)
+        if taken <= since and (best is None or taken > best[0]):
+            best = (taken, {**data, "path": str(path)})
+    return best[1] if best else None
+
+
+def _diff_payloads(before: Any, after: Any) -> dict[str, Any]:
+    """What changed between two answers to the same question.
+
+    Rows are matched by identity, never by position. Anything without an identity is reported
+    under `uncomparable` instead of being paired up by where it happened to sit — inventing a
+    change is worse than admitting the rows cannot be tracked.
+    """
+    old_items, _ = _envelope(before)
+    new_items, _ = _envelope(after)
+    old_items = old_items or []
+    new_items = new_items or []
+
+    old_by, new_by, uncomparable = {}, {}, 0
+    for row in old_items:
+        key = _row_identity(row)
+        if key is None:
+            uncomparable += 1
+        else:
+            old_by[key] = row
+    for row in new_items:
+        key = _row_identity(row)
+        if key is None:
+            uncomparable += 1
+        else:
+            new_by[key] = row
+
+    added = [new_by[k] for k in new_by.keys() - old_by.keys()]
+    removed = [old_by[k] for k in old_by.keys() - new_by.keys()]
+    changed = []
+    for key in old_by.keys() & new_by.keys():
+        old_row, new_row = old_by[key], new_by[key]
+        stripped_old, stripped_new = _strip_volatile(old_row), _strip_volatile(new_row)
+        fields = {
+            field: {"from": stripped_old.get(field), "to": stripped_new.get(field)}
+            for field in set(stripped_old) | set(stripped_new)
+            if stripped_old.get(field) != stripped_new.get(field)
+        }
+        if fields:
+            changed.append({"identity": key, "fields": fields})
+
+    return {
+        "added": added,
+        "removed": removed,
+        "changed": sorted(changed, key=lambda c: c["identity"]),
+        "unchanged": len(old_by.keys() & new_by.keys()) - len(changed),
+        "uncomparable_rows": uncomparable,
+        "ignored_fields": sorted(_VOLATILE_FIELDS),
+    }
+
+
+def _annotate_judgement_changes(diff: dict[str, Any], before_version: str | None,
+                                after_version: str | None) -> dict[str, Any]:
+    """Separate "the estate moved" from "we changed our mind about it".
+
+    Three production instances changed verdict between two runs five hours apart. Nothing
+    happened to those databases — a release had changed how the verdict is computed. A diff
+    that reports both the same way trains its reader to skim past it, which is the failure
+    mode this whole feature exists to avoid.
+    """
+    if before_version and after_version and before_version != after_version:
+        judgement_only = [
+            c for c in diff["changed"]
+            if set(c["fields"]) and set(c["fields"]) <= _JUDGEMENT_FIELDS
+        ]
+        if judgement_only:
+            diff["platform_version_changed"] = f"{before_version} → {after_version}"
+            diff["possibly_judgement_not_estate"] = [c["identity"] for c in judgement_only]
+            diff["note"] = (
+                f"The platform moved from {before_version} to {after_version} between these "
+                f"two snapshots. {len(judgement_only)} row(s) changed only in fields the "
+                f"platform computes, so the verdict may have been redefined rather than the "
+                f"database changing. Check the release notes before acting on those."
+            )
+    return diff
 
 
 def _sort_rows(payload: Any, sort_by: str | None, descending: bool) -> Any:
@@ -1341,6 +1560,18 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
              f"guard, not the data, is what ended the walk.",
     )
     parser.add_argument(
+        "--snapshot", action="store_true",
+        default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="Save this answer under ~/.dba-skill/snapshots so a later run can diff against it.",
+    )
+    parser.add_argument(
+        "--since", metavar="WHEN",
+        default=(argparse.SUPPRESS if suppress_defaults else None),
+        help="Diff against the newest snapshot at or before WHEN: last, yesterday, today, "
+             "6h, 3d, or an ISO timestamp. Fails loudly when there is nothing to compare "
+             "with — an empty diff and 'no snapshot' must never look alike.",
+    )
+    parser.add_argument(
         "--group-by", metavar="FIELD",
         default=(argparse.SUPPRESS if suppress_defaults else None),
         help="Count rows per distinct value of FIELD (dotted paths allowed). Rows missing the "
@@ -1700,6 +1931,48 @@ def main(argv: list[str] | None = None) -> int:
     _MAX_PAGES = int(getattr(args, "max_pages", None) or _MAX_PAGES)
     _COUNT_ONLY = bool(getattr(args, "count_only", False))
     payload = args.func(args)
+    fresh = payload  # what the server just said, before any diffing rewrites `payload`
+
+    since_raw = getattr(args, "since", None)
+    want_snapshot = bool(getattr(args, "snapshot", False))
+    platform_version = _platform_version() if (since_raw or want_snapshot) else None
+
+    if since_raw:
+        since = _parse_since(since_raw)
+        if since is None:
+            _fail("invalid_since", f"--since {since_raw!r} not understood. Use last, yesterday, "
+                                   f"today, 6h, 3d, or an ISO timestamp.", exit_code=2)
+        previous = _load_snapshot(sys.argv[1:], since)
+        if previous is None:
+            # The whole point of a diff is telling someone what moved. Returning an empty diff
+            # here would say "nothing changed" when the truth is "there is nothing to compare
+            # with" — the exact confusion this feature exists to remove.
+            _fail(
+                "no_snapshot",
+                f"No snapshot for this command at or before {since_raw}. Take one first: "
+                f"re-run with --snapshot, then come back later with --since.",
+                exit_code=2,
+                snapshot_dir=str(_snapshot_dir() or "<home unavailable>"),
+            )
+        diff = _diff_payloads(previous.get("payload"), payload)
+        diff = _annotate_judgement_changes(
+            diff, previous.get("platform_version"), platform_version
+        )
+        payload = {
+            "compared_with": previous.get("path"),
+            "baseline_taken_at": previous.get("taken_at"),
+            "current_at": datetime.now(timezone.utc).isoformat(),
+            **diff,
+        }
+
+    if want_snapshot:
+        # Snapshot what the server said, not the diff — and never by calling the endpoint a
+        # second time: two calls a moment apart are two different answers, and the snapshot
+        # would then describe neither the diff's baseline nor its result.
+        saved = _write_snapshot(fresh, sys.argv[1:], platform_version)
+        if saved:
+            sys.stderr.write(json.dumps({"snapshot": saved}, ensure_ascii=False) + "\n")
+
     if _COUNT_ONLY:
         payload = _counts_only(payload)
     payload = _sort_rows(payload, getattr(args, "sort_by", None), bool(getattr(args, "desc", False)))
