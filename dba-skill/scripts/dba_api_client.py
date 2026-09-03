@@ -1440,11 +1440,28 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
     # the same empty answer, which is the whole reason this command reports `unavailable`
     # separately from `ok: false`.
     elk_rows = elk.get("instances") if isinstance(elk, dict) else None
-    elk_covered: set[int] = {
-        int(row["id"]) for row in (elk_rows or [])
-        if isinstance(row, dict) and row.get("covered") and row.get("id") is not None
-    }
     elk_readable = isinstance(elk_rows, list)
+    elk_row = next(
+        (r for r in (elk_rows or [])
+         if isinstance(r, dict) and str(r.get("id")) == str(iid)), None
+    )
+
+    # Whether these subsystems are this instance's job at all — read from the platform, not
+    # re-derived here. Cloud RDS has no host to ship logs from and its backups belong to the
+    # vendor, so "no logs" and "no backup_method" are correct states, not gaps. Reporting them
+    # as missing would hang a permanent false gap on all 115 cloud instances, and a checklist
+    # that is never green is one people stop reading. The platform already answers both
+    # (`applicable` on the ELK row, `not_applicable` as the backup verdict); asking it keeps
+    # one definition of the rule instead of a copy here that drifts.
+    coverage_rows, _ = _envelope(_try_get("/dba/backups/coverage", {"limit": 2000}))
+    backup_row = next(
+        (r for r in (coverage_rows or [])
+         if isinstance(r, dict) and str(r.get("instance_id")) == str(iid)), None
+    )
+    backup_na = (backup_row or {}).get("verdict") == "not_applicable"
+    backup_na_reason = "; ".join((backup_row or {}).get("reasons") or []) or None
+    elk_na = elk_row is not None and elk_row.get("applicable") is False
+    elk_na_reason = (elk_row or {}).get("not_applicable_reason")
 
     findings = {
         # An empty list on a cluster member is correct: the owner holds the rows.
@@ -1452,22 +1469,33 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
             "ok": bool(db_count) or coverage in ("cluster_covered", "cluster_component"),
             "databases": db_count, "coverage": coverage,
         },
-        "backup_method": {"ok": bool(method), "backup_method": method,
-                          "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"},
+        "backup_method": (
+            {"ok": None, "not_applicable": backup_na_reason or "backups are the provider's"}
+            if backup_na else
+            {"ok": bool(method), "backup_method": method,
+             "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"}
+        ),
         "ownership": {"ok": bool(contact), "contact_person": contact},
-        # Unreadable coverage is not the same as uncovered: say which one it is.
+        # Three states, not two: covered, a real gap, or not this instance's job. Unreadable
+        # coverage is a fourth — say which one it is rather than folding them together.
         "elk_logs": (
-            {"ok": int(iid) in elk_covered, "host": host}
+            {"ok": None, "host": host,
+             "not_applicable": elk_na_reason or "logs are not shipped for this instance kind"}
+            if elk_na else
+            {"ok": bool(elk_row and elk_row.get("covered")), "host": host}
             if elk_readable
             else {"ok": None, "host": host, "unavailable": "could not read /elk/coverage"}
         ),
     }
     missing = [name for name, f in findings.items() if f["ok"] is False]
-    unknown = [name for name, f in findings.items() if f["ok"] is None]
+    not_applicable = [name for name, f in findings.items() if f.get("not_applicable")]
+    unknown = [name for name, f in findings.items()
+               if f["ok"] is None and name not in not_applicable]
     return {
         "instance_id": iid,
         "checks": findings,
         "missing": missing,
+        "not_applicable": not_applicable,
         # A check the platform could not answer is reported apart from one it answered "no":
         # collapsing them would let an outage read as a clean bill of health.
         "unknown": unknown,

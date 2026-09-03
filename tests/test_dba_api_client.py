@@ -1045,3 +1045,76 @@ def test_batch_mode_tells_you_the_field_name_instead_of_making_you_infer_it():
     # 多级路径本来就该能用
     out = client_module._project(payload, ["instance_id", "result.local.status"])
     assert [r["result.local.status"] for r in out["items"]] == ["ok", None]
+
+
+def test_onboarding_check_does_not_hang_permanent_false_gaps_on_cloud_rds(monkeypatch):
+    """云 RDS 没有主机可装日志采集器、备份归厂商管 —— 「没有日志」「没标 backup_method」是正确
+    状态,不是缺口。报成 missing 会让 115 台云实例常年挂着两个假缺口,而一份永远不会变绿的
+    清单,人会停止阅读它。
+
+    ★判定读平台(ELK 行的 applicable、备份的 not_applicable verdict),不在客户端重新实现
+    「是不是云 RDS」—— 一份规则两处实现必然漂移。
+    """
+    import argparse as _ap
+
+    responses = {
+        "/instances/42": {"host": "rm-x.mysql.rds.aliyuncs.com", "contact_person": "张三",
+                          "database_inventory_coverage": "owns"},
+        "/databases": {"items": [{"id": 1}], "total": 3},
+        "/instances/42/backups": {"backup_method": None},
+        "/elk/coverage": {"instances": [
+            {"id": 42, "covered": False, "applicable": False,
+             "not_applicable_reason": "cloud RDS: no host to ship from"},
+        ]},
+        "/dba/backups/coverage": {"items": [
+            {"instance_id": 42, "verdict": "not_applicable",
+             "reasons": ["cloud RDS: backups are managed by the provider"]},
+        ]},
+    }
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: responses.get(path))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=42))
+
+    assert out["missing"] == [], "云实例不该挂假缺口"
+    assert sorted(out["not_applicable"]) == ["backup_method", "elk_logs"]
+    assert "provider" in out["checks"]["backup_method"]["not_applicable"]
+    assert "no host" in out["checks"]["elk_logs"]["not_applicable"]
+    # 不适用 ≠ 判断不了:unknown 里不该混进它们
+    assert out["unknown"] == []
+
+
+def test_onboarding_check_still_reports_a_real_gap_on_a_self_managed_instance(monkeypatch):
+    """把不适用挑出去,不能顺手把真缺口也挑出去。"""
+    import argparse as _ap
+
+    responses = {
+        "/instances/27": {"host": "10.101.96.21", "contact_person": None,
+                          "database_inventory_coverage": None},
+        "/databases": {"items": [], "total": 0},
+        "/instances/27/backups": {"backup_method": None},
+        "/elk/coverage": {"instances": [{"id": 27, "covered": False, "applicable": True}]},
+        "/dba/backups/coverage": {"items": [{"instance_id": 27, "verdict": "at_risk"}]},
+    }
+    monkeypatch.setattr(client_module, "_try_get",
+                        lambda path, params=None: responses.get(path))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=27))
+    assert sorted(out["missing"]) == ["backup_method", "database_inventory", "elk_logs",
+                                      "ownership"]
+    assert out["not_applicable"] == []
+
+
+def test_onboarding_check_keeps_unreadable_apart_from_uncovered(monkeypatch):
+    """读不到 /elk/coverage 和「确实没上报日志」必须是两种输出 —— 这条 unavailable 分支
+    本来就是为此存在的,加 not_applicable 时不能把它压掉。"""
+    import argparse as _ap
+
+    monkeypatch.setattr(client_module, "_try_get", lambda path, params=None: (
+        {"host": "10.0.0.1", "contact_person": "x"} if path.startswith("/instances/9") and
+        path.endswith("9") else None))
+
+    out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=9))
+    elk = out["checks"]["elk_logs"]
+    assert elk["ok"] is None and "unavailable" in elk
+    assert "elk_logs" in out["unknown"] and "elk_logs" not in out["not_applicable"]
