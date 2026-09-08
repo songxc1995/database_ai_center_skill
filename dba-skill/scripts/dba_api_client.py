@@ -2061,24 +2061,48 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     def _coverage(year: str) -> tuple[int, str | None]:
         """(月数, partial 的原因)。原因为 None 表示这一年是完整的。
 
+        判据是**上下界分别解释**,不是两条各管一头的规则。前一版写成「当前年且从 1 月起」和
+        「起点年且到 12 月止」两条,当一年**同时是**起点年和当前年时(今年年中才接入的部署,
+        在它的第一个自然年内)——它既到不了 12 月、也不从 1 月起,两条都不命中,于是掉进兜底
+        的 missing_months,把一个完全正常的新部署报成账单缺口。本项目自己就差点是这个形状:
+        数据起点 2021-08。
+
+        所以改成分别问两个问题:**缺的那段月份,有没有一个不是缺口的解释?**
+          * 下界:从 1 月起,或者这就是序列的起点年(之前本来就没有数据)
+          * 上界:到 12 月止,或者这就是当前年(年还没过完,之后本来就还没发生)
+        两头都有解释才不是缺口;任何一头解释不了,就是真的少了账期。
+
         ★ ``seen.get(year, set())`` 取的是**空集**而不是 None:years 里有某年、months 里
-        一个月都没有 —— 那是最极端的账单缺口,而此前它是唯一连 partial 都不标的一种
-        (`covered.get(year)` 返回 None 被 `is not None` 挡在门外),读起来跟"完整"一模一样。
-        缺口最大的那种反而看不见,正是这个特性要防的东西。
+        一个月都没有 —— 那是最极端的账单缺口,而它曾经是唯一连 partial 都不标的一种,
+        读起来跟"完整"一模一样。
         """
         got = seen.get(year, set())
         n = len(got)
         if n >= 12:
             return n, None
         if not got:
-            return 0, "missing_months"          # 整年缺失
-        if max(got) - min(got) + 1 != n:
-            return n, "missing_months"          # 中间有洞,与是不是首/末年无关
-        if year == current_year and min(got) == 1:
-            return n, "year_in_progress"        # 从 1 月起、今年还没过完 —— 会自己补齐
-        if year == earliest and max(got) == 12:
-            return n, "series_start"            # 数据从年中开始、一直到年末 —— 永不补齐
-        return n, "missing_months"              # 连续但两头都解释不了 = 缺口
+            return 0, "missing_months"              # 整年缺失
+        lo, hi = min(got), max(got)
+        if hi - lo + 1 != n:
+            return n, "missing_months"              # 中间有洞,与是不是首/末年无关
+        is_first, is_now = year == earliest, year == current_year
+        lo_ok = lo == 1 or is_first                 # 序列就从这儿开始,之前不算"缺"
+        hi_ok = hi == 12 or is_now                  # 年还没过完,之后本来就没有
+        if lo_ok and hi_ok:
+            if is_first and is_now:
+                # 两者皆是:早于起点的那几个月永不补齐,而年内剩下的会自己补上。
+                return n, "series_start_in_progress"
+            return n, "year_in_progress" if is_now else "series_start"
+        # 账单是滞后出账的:跨年那几周,去年合法地还缺 12 月。仍然标 partial(不隐藏),
+        # 但给它自己的名字 —— 报成 missing_months 会让人每年年初白查一趟。
+        # 只对**当前年的前一年、只差 12 月、且现在还在 1–2 月**放行,窗口刻意开得很窄。
+        try:
+            prev_year = int(current_year) - 1 == int(year)
+        except (TypeError, ValueError):
+            prev_year = False
+        if prev_year and lo == 1 and hi == 11 and current_month <= 2:
+            return n, "awaiting_final_cycle"
+        return n, "missing_months"                  # 有一头解释不了 = 真的少了账期
     # ★ 按年份**排序**再算,不依赖服务端的返回顺序。位置式的 [0]/[-1] 在倒序返回时会把
     # series_start 和 year_in_progress 直接对调 —— 两个都错、方向相反、都是误导;而 prev_*
     # 的累加同样依赖顺序,倒序会让整个同比失真。对客户端不控制的数据做无防御的顺序假设,
@@ -2089,7 +2113,8 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     )
     known_years = [str(r.get("year")) for r in years]
     earliest = min(known_years) if known_years else None
-    current_year = str(datetime.now().year)
+    _now = datetime.now()
+    current_year, current_month = str(_now.year), _now.month
 
     def _pct(cur: Any, prev: Any) -> tuple[Any, Any]:
         if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)):
