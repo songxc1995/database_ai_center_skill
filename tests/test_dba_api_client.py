@@ -1753,3 +1753,43 @@ class TopologyAndSeriesHelperTest(unittest.TestCase):
         self.assertIn("aggregates", out["reason"])
         self.assertIn("不是调用失败", out["hint"])
         self.assertEqual(out["points"], [])
+
+
+class SeriesHintIsConditionalTest(unittest.TestCase):
+    """★ 我自己种下的那类问题:无条件给建议,于是**错的建议**发给了另外两种 422。
+
+    这个端点的 422 不止一种来源:
+      - 指标没有该粒度的汇总(该给"用 --hours 24"这条建议)
+      - hours 超过平台上限 720(参数校验,和汇总无关)
+      - granularity=raw 配大窗口(平台的另一条拒绝)
+    第一版无条件加那条建议,于是后两种都被告知"用 --hours 24 拿原始点"——**错的建议比没有建议
+    更贵**,它会让人去改一个不相干的参数。
+
+    匹配不上时**不加提示**,让平台自己那句话原样过去:那两条消息本身已经自解释。
+    这是 fail-safe 的方向——万一平台改了措辞,结果是"少一条提示",不是"多一条错提示"。
+    """
+
+    def _run(self, message: str):
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=75, ip=None, host=None,
+                                  metric_name="qps", hours=48, granularity=None)
+        with mock.patch.object(client_module, "_try_get",
+                               return_value={"unavailable": True, "status_code": 422}), \
+             mock.patch.object(client_module, "_LAST_HTTP_STATUS", 422), \
+             mock.patch.object(client_module, "_LAST_HTTP_BODY",
+                               json.dumps({"message": message})):
+            return client_module.cmd_metric_series(args)
+
+    def test_the_aggregates_422_gets_the_hint(self):
+        out = self._run("'qps' has raw samples but no 'minute' aggregates, so a 48h window ...")
+        self.assertIn("hint", out)
+        self.assertIn("--hours 24", out["hint"])
+
+    def test_an_unrelated_422_does_not_get_a_wrong_hint(self):
+        """守卫不能只会给建议。这两条如果也拿到"用 --hours 24",人会去改一个不相干的参数。"""
+        for message in ("Request validation failed",
+                        "granularity=raw is limited to hours<=24 (requested 100)."):
+            out = self._run(message)
+            self.assertNotIn("hint", out, message)
+            self.assertEqual(out["reason"], message, "平台自己那句话没有原样透出去")

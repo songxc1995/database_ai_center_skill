@@ -1927,17 +1927,25 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
             body = json.loads(_LAST_HTTP_BODY or "{}")
         except ValueError:
             body = {}
-        return {
+        reason = body.get("message") or body.get("detail") or (_LAST_HTTP_BODY or "")[:400]
+        out = {
             "instance_id": instance_id,
             "points": [],
             "unavailable": True,
-            "reason": body.get("message") or body.get("detail") or (_LAST_HTTP_BODY or "")[:400],
-            "hint": (
+            "reason": reason,
+        }
+        # ★ 只在平台**确实**在说"没有汇总"时才给那条建议。
+        # 这个端点的 422 不止一种来源:hours 超过 720 是参数校验,granularity=raw 配大窗口
+        # 是另一条拒绝——对它们说"用 --hours 24 拿原始点"是**错的建议**,而错的建议比没有建议
+        # 更贵。第一版就是无条件加,等于我自己种下了今天一直在修的那类问题:回答了,但把人带偏。
+        # 匹配不上时**不加提示**:平台那两条消息本身已经自解释,让它原样过去。
+        if "aggregates" in reason:
+            out["hint"] = (
                 "窗口超过 24 小时会切到汇总表,而云采集的指标从不写汇总表(平台 v3.64.x)。"
                 "用 --hours 24 拿原始点,或换一个有汇总的指标。"
                 "★ 这不是调用失败,是这个问题在这个窗口上没有答案。"
-            ),
-        }
+            )
+        return out
     if not isinstance(payload, list):
         return payload
     granularities = sorted({r.get("granularity") for r in payload if isinstance(r, dict)})
