@@ -36,6 +36,16 @@ event.
 **`determination` is historical.** `verified` means a backup once succeeded — for "is it fine
 now" read `recovery.latest_restore_point_at` and `sync_stale` / `sync_age_seconds`.
 
+**"这台的主库/备库是谁" 用 `topology`,不是 `/clusters`.** 集群成员关系只能包含**纳管的**
+实例,而生产 2026-09-08 实测:37 条复制边里 **33 条(89%)**有一端是未纳管的外部主机
+(229 个节点里 33 个是外部的)。`/clusters` 最多能看见 4 条 —— **而它给出的答案看起来是完整的**,
+那比给不出更糟。`topology --external-only` 就是它看不见的那部分。
+
+**"它一直这样还是刚变的" 用 `metric-series`,`latest` 只有一个点。**
+★ 24 小时是一道硬边界:超过它就切汇总表,而**云采集的指标没有汇总**。那时平台返回 422 并说明
+原因 —— 那个 422 **是答案的一部分**,不是调用失败;命令会把它整理成
+`unavailable + reason + hint` 返回,exit 0。
+
 **When anything is not working, run `whoami` first.** It answers four questions in one call
 that are otherwise four separate guesses: who the platform thinks you are (role), when the key
 expires, what rate limit you are against, and whether the platform itself is healthy. A bare
@@ -320,6 +330,8 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | Command | Endpoint |
 | --- | --- |
 | `whoami` | `GET /dba/whoami` — identity, key expiry, rate limits, platform health |
+| `topology` | `GET /topology` — 谁复制给谁,**含未纳管外部主机** |
+| `metric-series` | `GET /metrics/{id}/series` — 一个指标的走势 |
 | `self-check` | `GET /observability/self-check` — cross-subsystem invariants |
 | `instance` | one instance, everything (detail + freshness + backups + databases + alerts) |
 | `onboarding-check` | is a newly onboarded instance actually wired up |

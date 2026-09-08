@@ -1679,3 +1679,77 @@ class AppliedFiltersTest(unittest.TestCase):
     def test_commands_with_no_filters_stay_untouched(self):
         args = argparse.Namespace(format="json", count_only=False, func=lambda a: None)
         self.assertEqual(client_module._applied_filters(args), {})
+
+
+class TopologyAndSeriesHelperTest(unittest.TestCase):
+    """两条 helper 各自守住一件"现有答案是错的"的事。"""
+
+    def test_topology_inlines_names_and_names_what_clusters_cannot_see(self):
+        """边只带 id;不 inline 名字的话每个调用方都得自己和 nodes 做一次连接,
+        而那一步做错了没有任何东西会报错。
+
+        ★ 更要紧的是 coverage:`/clusters` 结构上只能显示**纳管**成员,生产 37 条复制边里
+        33 条有一端是 ext: 外部主机。用 /clusters 回答"主备是谁"会给出一个**残缺但看起来
+        完整**的答案 —— 这个数就是它看不见的部分。
+        """
+        from unittest import mock
+
+        payload = {
+            "nodes": [{"id": 38, "name": "rds-prd", "external": False, "engine": "mysql"}],
+            "edges": [{"from": "ext:10.1.2.3:3306", "to": 38, "kind": "replication",
+                       "sync_state": None}],
+        }
+        args = argparse.Namespace(instance_id=None, ip=None, host=None, external_only=False)
+        with mock.patch.object(client_module, "_request", return_value=payload):
+            out = client_module.cmd_topology(args)
+        edge = out["items"][0]
+        self.assertTrue(edge["from"]["external"])
+        self.assertEqual(edge["from"]["endpoint"], "10.1.2.3:3306")
+        self.assertEqual(edge["to"]["name"], "rds-prd", "纳管一端没有 inline 名字")
+        self.assertEqual(out["coverage"]["edges_touching_unmanaged"], 1)
+        self.assertIn("/clusters", out["coverage"]["note"])
+
+    def test_topology_uses_the_items_key_so_the_generic_flags_work(self):
+        """★ 叫 `edges` 更有描述性,但 _envelope 只认那几个集合键 —— 换个名字会让
+        --fields / --group-by / --sort-by / --count-only / --format table **全部静默失效**。
+        描述性换来一堆不工作的旗标,不划算。"""
+        from unittest import mock
+
+        payload = {"nodes": [], "edges": [{"from": 1, "to": 2, "kind": "replication"}]}
+        args = argparse.Namespace(instance_id=None, ip=None, host=None, external_only=False)
+        with mock.patch.object(client_module, "_request", return_value=payload):
+            out = client_module.cmd_topology(args)
+        items, meta = client_module._envelope(out)
+        self.assertIsNotNone(items, "_envelope 认不出这个集合,通用旗标会静默失效")
+        self.assertEqual(meta.get("items_key"), "items")
+
+    def test_an_instance_with_no_edges_says_which_kind_of_empty_it_is(self):
+        """"它确实是单机"和"复制关系没被发现"长得一样。拓扑是从各实例自己上报的主从信息推的,
+        一端不上报就整条边都看不到 —— 不能据此断言它没有备库。"""
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=999, ip=None, host=None, external_only=False)
+        with mock.patch.object(client_module, "_request",
+                               return_value={"nodes": [], "edges": []}):
+            out = client_module.cmd_topology(args)
+        self.assertEqual(out["items"], [])
+        self.assertIn("不要据此断言", out["note"])
+
+    def test_a_422_from_the_series_endpoint_is_the_answer_not_a_failure(self):
+        """★ 平台用 422 说明「这个指标没有该粒度的汇总,所以这个窗口什么都给不出」——
+        那正是提问者需要知道的。塞进 http_error 里等于把答案降级成报错,读的人会以为
+        是自己调错了。"""
+        from unittest import mock
+
+        body = json.dumps({"message": "no minute aggregates, so a 48h window has nothing to return"})
+        args = argparse.Namespace(instance_id=75, ip=None, host=None,
+                                  metric_name="qps", hours=48, granularity=None)
+        with mock.patch.object(client_module, "_try_get",
+                               return_value={"unavailable": True, "status_code": 422}), \
+             mock.patch.object(client_module, "_LAST_HTTP_STATUS", 422), \
+             mock.patch.object(client_module, "_LAST_HTTP_BODY", body):
+            out = client_module.cmd_metric_series(args)
+        self.assertTrue(out["unavailable"])
+        self.assertIn("aggregates", out["reason"])
+        self.assertIn("不是调用失败", out["hint"])
+        self.assertEqual(out["points"], [])

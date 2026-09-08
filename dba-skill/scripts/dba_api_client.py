@@ -276,6 +276,9 @@ _SUMMARY_ONLY = False
 
 # Last HTTP status seen, so the /dba prefix retry fires only for a genuine 404. A 401 is not
 # a path problem: retrying it just emits a second identical failure and buries the first.
+#: 最后一次 HTTP 错误的正文。有些 4xx 的正文**就是答案** —— 平台用 422 说明「这个问题在
+#: 这个窗口上没有答案」,只留状态码会把答案降级成报错。
+_LAST_HTTP_BODY: str | None = None
 _LAST_HTTP_STATUS: int | None = None
 
 # Parts that could not be read during this run. A composite answer built on an unreadable
@@ -1178,8 +1181,9 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
                 )
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
-        global _LAST_HTTP_STATUS
+        global _LAST_HTTP_STATUS, _LAST_HTTP_BODY
         _LAST_HTTP_STATUS = exc.code
+        _LAST_HTTP_BODY = raw
         if exc.code == 429:
             # Nothing ran: the limiter rejected the request before it reached the handler,
             # so this is safe to repeat. Retrying here rather than at the call site is the
@@ -1808,6 +1812,158 @@ def _parse_kv_params(raw_params: list[str] | None) -> dict[str, str]:
             _fail("invalid_argument", f"--param must be key=value, got: {item}", exit_code=2)
         params[key.strip()] = value
     return params
+
+
+def _resolve_instance_id(args: argparse.Namespace) -> Any:
+    """--instance-id,或从 --ip / --host 解析出来。找不到就响亮失败。"""
+    if getattr(args, "instance_id", None) is not None:
+        return args.instance_id
+    ip, host = getattr(args, "ip", None), getattr(args, "host", None)
+    if not (ip or host):
+        return None
+    resolved = _try_get("/dba/resolve", _clean_params({"ip": ip, "host": host}))
+    for key in ("instances", "matches", "items"):
+        rows = resolved.get(key) if isinstance(resolved, dict) else None
+        if isinstance(rows, list) and rows and isinstance(rows[0], dict):
+            return rows[0].get("instance_id") or rows[0].get("id")
+    _fail("not_found", f"no instance matched ip={ip} host={host}", exit_code=1,
+          resolve_response=resolved)
+
+
+def cmd_topology(args: argparse.Namespace) -> Any:
+    """谁复制给谁 —— 含**未纳管的外部主机**,而这正是 `/clusters` 给不出的那部分。
+
+    "这台的主库/备库是谁"以前被文档指向 `/clusters`。那是另一个问题的答案:集群成员关系
+    只能包含**纳管的**实例。生产 2026-09-08 实测:37 条复制边里 **33 条(89%)**有一端是
+    `ext:` 开头的外部主机,229 个节点里 33 个是外部的。所以 `/clusters` 最多能看见 4 条 ——
+    **而它给出的答案看起来是完整的**,这比给不出更糟。
+
+    边只带 id,不带名字。不 inline 的话,每个调用方都得自己拿 nodes 做一次连接,而那一步
+    做错了没有任何东西会报错 —— 和 `alerts` 把 instance 名字 inline 进来是同一个理由。
+    """
+    payload = _request("GET", "/topology")
+    if not isinstance(payload, dict):
+        return payload
+    nodes = {n.get("id"): n for n in (payload.get("nodes") or []) if isinstance(n, dict)}
+    edges = [e for e in (payload.get("edges") or []) if isinstance(e, dict)]
+
+    def side(ref: Any) -> dict[str, Any]:
+        if isinstance(ref, str) and ref.startswith("ext:"):
+            # 未纳管:平台只知道它的地址,别的一无所知。说清楚,不要留一个裸 id。
+            return {"ref": ref, "external": True, "endpoint": ref[4:], "name": None,
+                    "note": "未纳管主机——平台只知道地址,没有它的指标/备份/负责人"}
+        node = nodes.get(ref) or {}
+        return {"ref": ref, "external": bool(node.get("external")), "name": node.get("name"),
+                "engine": node.get("engine"), "instance_role": node.get("instance_role"),
+                "cluster_id": node.get("cluster_id")}
+
+    focus = _resolve_instance_id(args)
+    rows = []
+    for e in edges:
+        row = {"kind": e.get("kind"), "sync_state": e.get("sync_state"),
+               "from": side(e.get("from")), "to": side(e.get("to"))}
+        if focus is not None and focus not in (e.get("from"), e.get("to")):
+            continue
+        if args.external_only and not (row["from"]["external"] or row["to"]["external"]):
+            continue
+        rows.append(row)
+
+    ext_edges = sum(1 for e in edges
+                    if str(e.get("from")).startswith("ext:") or str(e.get("to")).startswith("ext:"))
+    out: dict[str, Any] = {
+        # 键名用 items 而不是 edges:_envelope 只认那几个集合键,叫别的名字会让
+        # --fields / --group-by / --sort-by / --count-only / --format table **全部静默失效**。
+        # 描述性更强的名字换来的是一堆不工作的旗标 —— 不划算。
+        "items": rows,
+        "item_kind": "replication_edge",
+        "focus_instance_id": focus,
+        "coverage": {
+            "edges_total": len(edges),
+            "edges_touching_unmanaged": ext_edges,
+            "nodes_total": len(nodes),
+            "nodes_unmanaged": sum(1 for n in nodes.values() if n.get("external")),
+            "note": (
+                "复制关系里带 ext: 的一端是**未纳管**主机。/clusters 结构上只能显示纳管成员,"
+                "所以用它回答「主备是谁」会给出一个**残缺但看起来完整**的答案 —— "
+                "这里的 edges_touching_unmanaged 就是它看不见的部分。"
+            ),
+        },
+    }
+    if focus is not None and not rows:
+        # 空结果要说清是哪一种空。
+        out["note"] = (
+            "实例 %s 在拓扑里没有任何复制边。★ 这有两种含义,而它们长得一样:"
+            "「它确实是单机」,或者「复制关系没被发现」——拓扑是从各实例自己上报的主从信息推的,"
+            "一端不上报就整条边都看不到。**不要据此断言它没有备库。**" % focus
+        )
+    return out
+
+
+def cmd_metric_series(args: argparse.Namespace) -> Any:
+    """一个指标的走势。`latest` 只给一个点,而"它一直这样还是刚变的"要靠曲线回答。
+
+    ★ 24 小时是一道**硬边界**:窗口一旦超过它就改从汇总表取数,而**云采集的指标从不写汇总表**
+    (见平台 v3.64.x)。所以对云 RDS 实例问 48 小时的 `threads_running`,平台会返回 422 而不是
+    一个空数组 —— 那个 422 是答案的一部分,不是调用失败。这里原样透出它,并把粒度切换点讲清楚。
+    """
+    instance_id = _resolve_instance_id(args)
+    if instance_id is None:
+        _fail("missing_instance", "metric-series needs --instance-id N, or --ip/--host.",
+              exit_code=2)
+    payload = _try_get(
+        f"/metrics/{instance_id}/series",
+        _clean_params({"metric_name": args.metric_name, "hours": args.hours,
+                       "granularity": args.granularity}),
+    )
+    if _unavailable(payload):
+        if _LAST_HTTP_STATUS != 422:
+            _fail("http_error",
+                  "GET /metrics/%s/series returned HTTP %s" % (instance_id, _LAST_HTTP_STATUS),
+                  status_code=_LAST_HTTP_STATUS)
+        # ★ 这里的 422 **是答案的一部分**,不是调用失败:平台在说「这个指标没有该粒度的汇总,
+        # 所以这个窗口什么都给不出」——而那正是提问者需要知道的。塞进 http_error 里等于把
+        # 答案降级成报错,读的人会以为是自己调错了。
+        try:
+            body = json.loads(_LAST_HTTP_BODY or "{}")
+        except ValueError:
+            body = {}
+        return {
+            "instance_id": instance_id,
+            "points": [],
+            "unavailable": True,
+            "reason": body.get("message") or body.get("detail") or (_LAST_HTTP_BODY or "")[:400],
+            "hint": (
+                "窗口超过 24 小时会切到汇总表,而云采集的指标从不写汇总表(平台 v3.64.x)。"
+                "用 --hours 24 拿原始点,或换一个有汇总的指标。"
+                "★ 这不是调用失败,是这个问题在这个窗口上没有答案。"
+            ),
+        }
+    if not isinstance(payload, list):
+        return payload
+    granularities = sorted({r.get("granularity") for r in payload if isinstance(r, dict)})
+    names = sorted({r.get("metric_name") for r in payload if isinstance(r, dict)})
+    values = [r.get("value") for r in payload
+              if isinstance(r, dict) and isinstance(r.get("value"), (int, float))]
+    out: dict[str, Any] = {
+        "instance_id": instance_id,
+        "points": payload,
+        "summary": {
+            "points": len(payload),
+            "metrics": names,
+            "granularity": granularities,
+            "first_at": payload[0].get("collected_at") if payload else None,
+            "last_at": payload[-1].get("collected_at") if payload else None,
+        },
+    }
+    if values:
+        out["summary"].update({"min": min(values), "max": max(values),
+                               "first": values[0], "last": values[-1]})
+    if granularities and granularities != ["raw"]:
+        out["summary"]["note"] = (
+            "窗口超过 24 小时,取的是**汇总**而非原始点(value 是该桶的均值,另有 min/max)。"
+            "云采集的指标没有汇总,所以它们在这个窗口里查不到——平台会用 422 说明,不是空数组。"
+        )
+    return out
 
 
 def cmd_get(args: argparse.Namespace) -> Any:
@@ -2656,6 +2812,31 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_rightsizing.add_argument("--mem-max", type=float, help="Memory-pressure impediment %% (default 70)")
     cloud_rightsizing.add_argument("--vendor", choices=["aliyun", "huawei"], help="Restrict to one provider")
     cloud_rightsizing.set_defaults(func=cmd_cloud_rightsizing)
+
+    topo = sub.add_parser(
+        "topology",
+        help="复制拓扑:谁复制给谁,**含未纳管的外部主机**(/clusters 给不出这部分)",
+    )
+    topo.add_argument("--instance-id", type=int, help="只看这台相关的边")
+    topo.add_argument("--ip")
+    topo.add_argument("--host")
+    topo.add_argument("--external-only", action="store_true",
+                      help="只看一端是未纳管主机的边——那是 /clusters 完全看不见的部分。")
+    topo.set_defaults(func=cmd_topology)
+
+    mseries = sub.add_parser(
+        "metric-series",
+        help="一个指标的走势(latest 只给一个点)。★ >24h 会切汇总表,云采集指标在那儿没有数据",
+    )
+    mseries.add_argument("--instance-id", type=int)
+    mseries.add_argument("--ip")
+    mseries.add_argument("--host")
+    mseries.add_argument("--metric-name", help="不传则返回全部指标——通常很大,建议指定")
+    mseries.add_argument("--hours", type=int, default=24,
+                         help="回看窗口,默认 24(★ 超过 24 会切到汇总表)")
+    mseries.add_argument("--granularity", choices=["auto", "raw", "minute", "hour", "day"],
+                         help="默认 auto:≤24h 用 raw,再往上依次 minute/hour/day")
+    mseries.set_defaults(func=cmd_metric_series)
 
     cloud_savings = sub.add_parser(
         "cloud-savings-realized",
