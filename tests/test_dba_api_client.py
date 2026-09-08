@@ -1889,3 +1889,17 @@ class MetricSeriesUnknownVocabularyTest(unittest.TestCase):
         empty_window = self._run("qps", vocab)
         self.assertNotIn("unavailable", empty_window)
         self.assertIn("这段时间没有数据", empty_window["summary"]["note"])
+
+
+def test_topology_passes_through_the_inference_marker():
+    """★ 平台打 `resolved_by` 的全部理由是让人看得见"这条边是猜的"。
+    helper 在中间丢掉它,等于那个标记白加了 —— 第一版正是这么丢的:平台标 2 条,这儿显示 0 条。"""
+    from unittest import mock
+
+    payload = {"nodes": [{"id": 2, "name": "sby", "external": False}],
+               "edges": [{"from": 1, "to": 2, "kind": "replication",
+                          "sync_state": "async", "resolved_by": "address_fallback"}]}
+    args = argparse.Namespace(instance_id=None, ip=None, host=None, external_only=False)
+    with mock.patch.object(client_module, "_request", return_value=payload):
+        out = client_module.cmd_topology(args)
+    assert out["items"][0]["resolved_by"] == "address_fallback"

@@ -1862,6 +1862,10 @@ def cmd_topology(args: argparse.Namespace) -> Any:
     for e in edges:
         row = {"kind": e.get("kind"), "sync_state": e.get("sync_state"),
                "from": side(e.get("from")), "to": side(e.get("to"))}
+        # 平台标了"这条边是靠地址猜的"就带上 —— 这个标记存在的全部理由就是让人看得见,
+        # 在这里丢掉等于把它加了个寂寞。(第一版就是这么丢的:平台标 2 条,我这儿显示 0 条。)
+        if e.get("resolved_by"):
+            row["resolved_by"] = e["resolved_by"]
         if focus is not None and focus not in (e.get("from"), e.get("to")):
             continue
         if args.external_only and not (row["from"]["external"] or row["to"]["external"]):
