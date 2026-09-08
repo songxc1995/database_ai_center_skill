@@ -2087,12 +2087,23 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
             return n, "missing_months"              # 中间有洞,与是不是首/末年无关
         is_first, is_now = year == earliest, year == current_year
         lo_ok = lo == 1 or is_first                 # 序列就从这儿开始,之前不算"缺"
-        hi_ok = hi == 12 or is_now                  # 年还没过完,之后本来就没有
+        # ★ 当前年的上界必须和**现在到哪个月了**比,不能只凭"是今年"就放行。
+        # 写成 `hi == 12 or is_now` 时,is_now 是一张无条件通行证:今年的账单从 3 月起就断了,
+        # 缺了 4–9 月,照样被说成"年还没过完"—— 真缺口被吸收成正常在途,而这正是本项目
+        # 最贵的那类错。留一个月余量:当月账期可能还没出账(本部署 09-08 就已有 2026-09,
+        # 出账很快;慢的凭据需要这一格)。
+        hi_ok = hi == 12 or (is_now and hi >= current_month - 1)
         if lo_ok and hi_ok:
-            if is_first and is_now:
-                # 两者皆是:早于起点的那几个月永不补齐,而年内剩下的会自己补上。
+            # ★ 按**实际用到了哪条放宽**贴标签,不按"哪个标志为真"。
+            # 一个只有 2026 一年的序列,它既是 earliest 也是 current_year,但如果它从 1 月起,
+            # 下界压根不需要"起点年"这条豁免 —— 标成 series_start_in_progress 就是在说
+            # "早于起点的月份永不补齐",而它根本没有更早的月份。这是同一个洞的第三次:
+            # 前两次是两条规则各管一头留下缝隙,这次是标签读的是标志而不是理由。
+            used_start = lo != 1        # 下界靠"这是序列起点年"才成立
+            used_progress = hi != 12    # 上界靠"今年还没过完"才成立
+            if used_start and used_progress:
                 return n, "series_start_in_progress"
-            return n, "year_in_progress" if is_now else "series_start"
+            return n, "year_in_progress" if used_progress else "series_start"
         # 账单是滞后出账的:跨年那几周,去年合法地还缺 12 月。仍然标 partial(不隐藏),
         # 但给它自己的名字 —— 报成 missing_months 会让人每年年初白查一趟。
         # 只对**当前年的前一年、只差 12 月、且现在还在 1–2 月**放行,窗口刻意开得很窄。
@@ -2100,7 +2111,9 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
             prev_year = int(current_year) - 1 == int(year)
         except (TypeError, ValueError):
             prev_year = False
-        if prev_year and lo == 1 and hi == 11 and current_month <= 2:
+        # ★ 这里用 lo_ok 而不是 lo == 1:年中接入的部署永远满足不了 lo == 1,于是它的
+        # "去年"每逢年初都会被报成缺口 —— 和 FP-1 同一个洞(又一条规则默认序列从 1 月起)。
+        if prev_year and lo_ok and hi == 11 and current_month <= 2:
             return n, "awaiting_final_cycle"
         return n, "missing_months"                  # 有一头解释不了 = 真的少了账期
     # ★ 按年份**排序**再算,不依赖服务端的返回顺序。位置式的 [0]/[-1] 在倒序返回时会把

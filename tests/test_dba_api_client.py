@@ -1330,3 +1330,148 @@ def test_an_active_instance_absent_from_the_coverage_table_is_unknown(monkeypatc
     out = client_module.cmd_onboarding_check(_ap.Namespace(instance_id=8))
     assert out["missing"] == []
     assert out["unknown"] == ["backup_method"] and out["ok"] is False
+
+
+class YearCoverageTest(unittest.TestCase):
+    """`--yoy` 的 partial_reason 判据。
+
+    这段判据被连续找出**四**个洞,每一个的形状都一样:**规则各管一头,交界处没人管**。
+      1. FP-1  「当前年且从 1 月起」和「起点年且到 12 月止」两条,遇到一年同时是两者时都不命中
+      2. FP-3  awaiting_final_cycle 又默认了 lo == 1,年中接入的部署永远满足不了
+      3. FN-1  hi_ok 写成 `hi == 12 or is_now`,is_now 成了无条件通行证 —— 今年断采被吸收成"还没过完"
+      4. 标签  按"哪个标志为真"贴,而不是按"实际用了哪条放宽",于是 01..09 的单年序列被说成
+               "早于起点的月份永不补齐",而它根本没有更早的月份
+
+    所以这些用例分两组,缺一不可:**该报的必须报**(否则真缺口被静默),
+    **不该报的必须不报**(否则每次有人白查一趟)。只有一组的话,任何一次"修"都能靠倒向
+    另一边来通过。
+    """
+
+    @staticmethod
+    def _year(y):
+        return {"year": y, "gross": 10.0, "paid": 5.0, "coupon": 0.0}
+
+    @staticmethod
+    def _months(y, ms):
+        return [{"cycle": "%s-%02d" % (y, i)} for i in ms]
+
+    def _reasons(self, years, months, now=None):
+        import datetime as _dt
+        from unittest import mock
+        if now is None:
+            now = _dt.datetime(2026, 9, 8)
+
+        class _Frozen(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        with mock.patch.object(client_module, "datetime", _Frozen):
+            rows = client_module._year_on_year(years, months)
+        return {r["year"]: r.get("partial_reason") for r in rows}
+
+    # ---- 该报的必须报 ---------------------------------------------------------
+    def test_current_year_that_stopped_collecting_is_a_gap(self):
+        """★ FN-1:今年 4–9 月全缺,却被 `hi == 12 or is_now` 吸收成"年还没过完"。
+        真缺口被说成正常,比误报贵得多。"""
+        for last, tag in ((4, "01..03"), (7, "01..06")):
+            got = self._reasons([self._year("2026")], self._months("2026", range(1, last)))
+            self.assertEqual(got["2026"], "missing_months", tag)
+
+    def test_a_hole_in_the_middle_is_a_gap(self):
+        got = self._reasons([self._year("2022"), self._year("2023")],
+                            self._months("2022", range(1, 13)) + self._months("2023", [8, 9, 11, 12]))
+        self.assertEqual(got["2023"], "missing_months")
+
+    def test_a_year_with_no_months_at_all_is_the_loudest_gap(self):
+        """整年缺失曾经是唯一连 partial 都不标的一种 —— 缺口最大的那种反而看不见。"""
+        got = self._reasons([self._year("2022"), self._year("2023"), self._year("2024")],
+                            self._months("2022", range(1, 13)) + self._months("2024", range(1, 13)))
+        self.assertEqual(got["2023"], "missing_months")
+
+    def test_a_series_that_stops_in_a_past_year_is_a_gap(self):
+        got = self._reasons([self._year("2023"), self._year("2024")],
+                            self._months("2023", range(1, 13)) + self._months("2024", range(1, 7)))
+        self.assertEqual(got["2024"], "missing_months")
+
+    def test_starting_mid_year_is_only_excused_for_the_first_year(self):
+        got = self._reasons([self._year("2022"), self._year("2023"), self._year("2024")],
+                            self._months("2022", range(1, 13)) + self._months("2023", range(3, 13))
+                            + self._months("2024", range(1, 13)))
+        self.assertEqual(got["2023"], "missing_months")
+
+    # ---- 不该报的必须不报 -----------------------------------------------------
+    def test_a_deployment_onboarded_mid_year_is_not_a_gap(self):
+        """★ FP-1:起点年即当前年 —— 既到不了 12 月也不从 1 月起,两条规则都不命中。
+        本项目自己就差点是这个形状(数据起点 2021-08)。"""
+        got = self._reasons([self._year("2026")], self._months("2026", range(3, 10)))
+        self.assertEqual(got["2026"], "series_start_in_progress")
+
+    def test_the_current_month_may_not_have_been_billed_yet(self):
+        """留一个月余量:当月账期可能还没出账。"""
+        got = self._reasons([self._year("2026")], self._months("2026", range(1, 9)))
+        self.assertEqual(got["2026"], "year_in_progress")
+
+    def test_a_full_january_start_is_not_called_a_series_start(self):
+        """★ 标签按**实际用了哪条放宽**贴,不按哪个标志为真。一个只有 2026 一年、从 1 月起的
+        序列既是 earliest 也是 current_year,但下界压根不需要"起点年"这条豁免 ——
+        标成 series_start_in_progress 是在说"早于起点的月份永不补齐",而它没有更早的月份。"""
+        self.assertEqual(self._reasons([self._year("2026")],
+                                       self._months("2026", range(1, 10)))["2026"],
+                         "year_in_progress")
+        import datetime as _dt
+        self.assertEqual(self._reasons([self._year("2026")], self._months("2026", [1]),
+                                       now=_dt.datetime(2026, 1, 20))["2026"],
+                         "year_in_progress")
+
+    def test_the_real_production_shape_is_clean(self):
+        got = self._reasons([self._year("2021"), self._year("2026")],
+                            self._months("2021", range(8, 13)) + self._months("2026", range(1, 10)))
+        self.assertEqual(got["2021"], "series_start")
+        self.assertEqual(got["2026"], "year_in_progress")
+
+    # ---- 账单滞后:改名,不是消音 ----------------------------------------------
+    def test_last_years_december_may_still_be_in_flight_in_january(self):
+        """★ FP-3:这条规则也默认了 lo == 1,于是年中接入的部署每逢年初都被报成缺口。
+        窗口很窄,而且**仍然标 partial** —— 是改名不是消音。"""
+        import datetime as _dt
+        got = self._reasons([self._year("2025"), self._year("2026")],
+                            self._months("2025", range(6, 12)) + self._months("2026", [1]),
+                            now=_dt.datetime(2026, 1, 15))
+        self.assertEqual(got["2025"], "awaiting_final_cycle")
+
+    def test_the_billing_lag_window_closes(self):
+        """宽限过期就变回缺口 —— 一个永不过期的宽限就是消音。"""
+        import datetime as _dt
+        got = self._reasons([self._year("2025"), self._year("2026")],
+                            self._months("2025", range(6, 12)) + self._months("2026", range(1, 6)),
+                            now=_dt.datetime(2026, 5, 15))
+        self.assertEqual(got["2025"], "missing_months")
+
+    def test_two_missing_months_is_not_billing_lag(self):
+        import datetime as _dt
+        got = self._reasons([self._year("2025"), self._year("2026")],
+                            self._months("2025", range(1, 11)) + self._months("2026", [1]),
+                            now=_dt.datetime(2026, 1, 15))
+        self.assertEqual(got["2025"], "missing_months")
+
+    # ---- 对服务端返回形状不做无防御假设 ----------------------------------------
+    def test_reverse_order_from_the_server_does_not_swap_the_labels(self):
+        """位置式的 [0]/[-1] 在倒序返回时会把 series_start 与 year_in_progress 直接对调:
+        两个都错、方向相反、都是误导。"""
+        got = self._reasons([self._year("2026"), self._year("2021")],
+                            self._months("2026", range(1, 10)) + self._months("2021", range(8, 13)))
+        self.assertEqual(got["2021"], "series_start")
+        self.assertEqual(got["2026"], "year_in_progress")
+
+    def test_no_month_series_says_so_instead_of_looking_complete(self):
+        """没有月度序列就无法判断完整性。此前整个 partial 机制静默消失,每年都像完整的 ——
+        「查不了」和「没问题」必须是两种可见的答案。"""
+        rows = client_module._year_on_year([self._year("2025"), self._year("2026")], None)
+        for row in rows:
+            self.assertTrue(row.get("coverage_unknown"))
+            self.assertTrue(row.get("coverage_unknown_reason"))
+            self.assertIsNone(row.get("partial"))
+
+    def test_a_non_numeric_year_does_not_crash(self):
+        self._reasons([self._year("FY26")], self._months("2026", range(1, 4)))
