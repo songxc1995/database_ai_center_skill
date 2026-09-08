@@ -249,9 +249,30 @@ asked, in the direction that reads as "fine".
 ## Metric values carry the platform's own doubts
 
 Rows from `metrics/{id}/latest` may include `data_quality` (`drift` / `outlier` /
-`null_value`, with severity). Roughly a third of the estate has at least one flagged metric.
-Quote a flagged value only together with the flag. `data_quality: null` means *no open
-finding* — the absence is information, not a missing field.
+`null_value`, with severity).
+
+**A flag records the last time that check FIRED. It is not a currently-open problem.**
+`DataQualityIssue` has no resolved/open column — it is an append-only log — and the endpoint
+attaches the newest row per metric with no time filter at all. The checks run roughly 14× per
+metric per day, so a 90-day-old flag has been followed by about 1,200 passes.
+
+Measured on production instance 75 (2026-09-08): **24 of its 44 metrics carried a flag, 5 of
+them older than 60 days.** The oldest said `qps` had drifted to 37.44; the current value was
+10.87 — a 71% difference. Two more were 63% and 40% off.
+
+| Field | Read it for |
+|---|---|
+| `applies_to_current_value` | **the decision.** True only when the finding was checked *after* the sample you are holding |
+| `age_days` | a quick human read |
+| `checked_at` | the raw timestamp, if you need to reason about it yourself |
+
+**Quote the flag as a caveat only when `applies_to_current_value` is true.** Repeating a stale
+one manufactures **false uncertainty**: it makes someone distrust a value that is fine. That
+failure mode survives because it looks like caution — the opposite direction from the usual
+"reported it as clean", and harder to notice.
+
+`data_quality: null` means the check has **never** fired for this metric on this instance —
+the absence is information, not a missing field.
 
 ## Gaps are reported, never omitted
 

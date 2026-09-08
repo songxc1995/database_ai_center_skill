@@ -71,9 +71,19 @@ and must never be reported as healthy.
 
 **Metric values carry the platform's own doubts.** Each row from
 `GET /metrics/{id}/latest` may include `data_quality` (`drift` / `outlier` / `null_value` with
-severity). About a third of the fleet has at least one flagged metric. If a value you are about
-to quote is flagged, say so; do not present it as a clean fact. `data_quality: null` means no
-open finding — that absence is information, not a missing field.
+severity). **A flag is the last time that check FIRED, not a currently-open problem** — the
+underlying table has no resolved/open column, it is an append-only log, and the checks run
+~14× per metric per day. Measured on production instance 75 (2026-09-08): **24 of its 44
+metrics carried a flag, 5 of them older than 60 days**; the oldest said `qps` had drifted to
+37.44 while the current value was 10.87.
+
+**Read `applies_to_current_value` before quoting the flag as a caveat.** It is true only when
+the finding was checked *after* the sample you are looking at; `age_days` is there for a quick
+read. Repeating a stale flag manufactures **false uncertainty** — it makes someone distrust a
+value that is fine, and that failure looks like caution, which is why it survives.
+
+`data_quality: null` means the check has **never** fired for this metric on this instance —
+that absence is information, not a missing field.
 
 **Gaps are reported, never omitted.** `GET /dba/capacity/forecast` returns instances it could
 not project under `gaps` with a reason (pass `include_gaps=true`). Diagnostic probes return
