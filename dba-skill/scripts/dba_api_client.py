@@ -1071,6 +1071,12 @@ _SENSITIVE_KEYS = frozenset({
     "secret", "token", "access_token", "api_key", "apikey", "private_key",
     "dsn", "connection_string", "conn_string",
 })
+# ★ **不要往这个名单里加 `owner` / `object_name`。** Oracle 有按 schema 属主的空间探针
+#   (`owner_top_segments`、`tablespace_segments_by_owner`),实跑 inst35 确认:属主是**输入参数**
+#   (`param_kind: "owner"`),结果列是 segment_name / segment_type / size_gb / tablespace_name。
+#   加 `object_name` 会把 `applied_filters.object_name` 遮掉 —— 那是"这次查的是谁的段",
+#   遮了报表就没法回答自己在说哪个属主。schema 属主是正当诊断数据,不是登录账号。
+#   (`login` / `db_user` 实测在 23 个端点的 495 个字段名里零占用,留着不花成本。)
 _SENSITIVE_SUFFIXES = ("_password", "_passwd", "_secret", "_token", "_api_key", "_apikey")
 _REDACTED = "<redacted-by-dba-skill>"
 
@@ -1082,6 +1088,23 @@ _REDACTED = "<redacted-by-dba-skill>"
 #   取值只有固定几种措辞和文件路径,真正的 key 从不放进去。
 #   只豁免这一层父路径(不是前缀):再往下如果哪天多出嵌套,照样遮。
 _REDACTION_EXEMPT_PARENTS = frozenset({"credentials.per_key_source"})
+
+# ★ 值兜底分两层,分界线是**匹配粒度**而不是长度 —— 长度这个轴分不开真正危险的那种 key。
+#   实测(11 条命令 / 514KB 真实输出 / 24,995 个字符串值):
+#
+#       随机串碰撞   4 位 7.8% → 5 位 0.2% → **6 位起 0%**
+#       词形串       root 子串命中 27、prd 588、ha 948 —— 而**整值命中全是 0**
+#
+#   也就是说:随机 key 6 位就安全,而 `prd` 这种 3 位词形 key 撞 588 次。同样长度、
+#   碰撞率差几个数量级,所以"设个最短长度"拦不住我原本担心的那种 key。整值匹配才拦得住。
+#
+#   第一层 整值相等  → 一律遮,不设门槛。短 key 也照样受保护,且实测零误遮。
+#   第二层 子串命中  → 仅当 key 长度 ≥ 门槛。这层不能省:key 嵌在连接串
+#                     `postgres://u:KEY@host` 或 `?api_key=` 里时,整值匹配看不见。
+#   门槛取 12:本部署真实 key 是 36 / 48 位(两把都远在门槛之上,不会被降级),
+#   而 12 位以上的词形串撞上无关输出的可能性已经可以忽略。
+_KEY_SUBSTRING_MIN = 12
+_SHORT_KEY_ANNOUNCED = False
 
 
 def _is_sensitive_key(key: str) -> bool:
@@ -1101,7 +1124,31 @@ def _leaks(key: str, value: Any, parent_path: str) -> bool:
     if _is_sensitive_key(key) and parent_path not in _REDACTION_EXEMPT_PARENTS:
         return True
     live = os.environ.get("PROJECT_API_KEY", "").strip()
-    return bool(live) and isinstance(value, str) and live in value
+    if not live or not isinstance(value, str):
+        return False
+    if value.strip() == live:
+        return True                      # 第一层:整值,无门槛
+    return len(live) >= _KEY_SUBSTRING_MIN and live in value   # 第二层:子串,有门槛
+
+
+def _announce_substring_layer_downgrade() -> None:
+    """key 太短导致子串那层关掉时,说一次。
+
+    ★ 我自己写过"遮蔽过宽和过窄一样是缺陷,过宽的更难发现";**静默降级比静默过宽更危险** ——
+    过宽至少在输出里留下了标记,而降级什么痕迹都没有:遮蔽看起来仍在工作,只是少了一层。
+    说出来,它就不再是静默的了。
+    """
+    global _SHORT_KEY_ANNOUNCED
+    if _SHORT_KEY_ANNOUNCED:
+        return
+    live = os.environ.get("PROJECT_API_KEY", "").strip()
+    if live and len(live) < _KEY_SUBSTRING_MIN:
+        _SHORT_KEY_ANNOUNCED = True
+        sys.stderr.write(
+            "[redacted] ★ 当前 PROJECT_API_KEY 只有 %d 位(门槛 %d),子串兜底这一层已关闭:"
+            "整值相等仍然会遮,但 key 嵌在连接串或 URL 里时不会被认出来。"
+            "短 key 拿它去撞正常输出的误遮率太高,不能开。\n"
+            % (len(live), _KEY_SUBSTRING_MIN))
 
 
 def _redact_outbound(payload: Any, _path: str = "", _found: list[str] | None = None) -> Any:
@@ -1118,6 +1165,7 @@ def _redact_outbound(payload: Any, _path: str = "", _found: list[str] | None = N
     top = _found is None
     if top:
         _found = []
+        _announce_substring_layer_downgrade()
     if isinstance(payload, dict):
         out = {}
         for key, value in payload.items():

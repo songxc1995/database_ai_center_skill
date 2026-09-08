@@ -2172,20 +2172,72 @@ def test_redaction_does_not_eat_the_field_that_says_which_key_is_in_use():
     assert out["credentials"]["credential_source"] == "/Users/admin/project/.env"
 
 
-def test_redaction_catches_the_key_itself_under_an_innocent_field_name():
-    """兜底:值逐字节等于当前这把 key 就遮,**不看字段叫什么**。
+SHORT_KEY = "prd"                       # 词形短 key:实测子串命中 588 次、整值命中 0 次
+LONG_KEY = "sk-live-" + "a1b2c3d4e5" * 3   # 38 位,和本部署真实 key(36/48)同量级
 
-    按名字遮永远只能拦住起对了名字的那些;平台哪天把 key 回显在一个叫 `note` 的字段里,
-    键名规则一点反应都不会有。这一条是那类的唯一防线,连豁免名单也压不过它。
-    """
+
+def _redact(payload, key):
+    """跑一次脱敏,返回 (结果, stderr)。每次都清掉一次性公告的标志位。"""
     import io
     from unittest import mock
 
-    payload = {"note": "used key sk-live-xyz to authenticate",
-               "credentials": {"per_key_source": {"PROJECT_API_KEY": "sk-live-xyz"}}}
-    with mock.patch.dict(client_module.os.environ, {"PROJECT_API_KEY": "sk-live-xyz"}), \
-            mock.patch.object(client_module.sys, "stderr", io.StringIO()):
-        out = client_module._redact_outbound(payload)
-    assert out["note"] == "<redacted-by-dba-skill>"
+    err = io.StringIO()
+    client_module._SHORT_KEY_ANNOUNCED = False
+    with mock.patch.dict(client_module.os.environ, {"PROJECT_API_KEY": key}), \
+            mock.patch.object(client_module.sys, "stderr", err):
+        return client_module._redact_outbound(payload), err.getvalue()
+
+
+def test_redaction_catches_the_key_itself_under_an_innocent_field_name():
+    """第一层:值**整个**等于当前这把 key 就遮,不看字段叫什么,也不设长度门槛。
+
+    按名字遮永远只能拦住起对了名字的那些;平台哪天把 key 回显在一个叫 `note` 的字段里,
+    键名规则一点反应都不会有。短 key 也必须走这一层 —— 它同样是真 key。
+    """
+    payload = {"note": SHORT_KEY,
+               "credentials": {"per_key_source": {"PROJECT_API_KEY": SHORT_KEY}}}
+    out, _ = _redact(payload, SHORT_KEY)
+    assert out["note"] == "<redacted-by-dba-skill>", "短 key 整值出现却没遮"
     assert out["credentials"]["per_key_source"]["PROJECT_API_KEY"] == "<redacted-by-dba-skill>", \
         "豁免名单压过了兜底规则 —— 真 key 落进豁免的子树就出去了"
+
+
+def test_a_long_key_is_caught_even_when_buried_in_a_connection_string():
+    """第二层:key 嵌在连接串/URL 里,整值匹配看不见,所以子串这层不能省。"""
+    payload = {"dsn_note": "postgres://svc:%s@10.0.0.1:5432/app" % LONG_KEY,
+               "callback": "https://x/y?api_key=%s&t=1" % LONG_KEY}
+    out, _ = _redact(payload, LONG_KEY)
+    assert out["dsn_note"] == "<redacted-by-dba-skill>"
+    assert out["callback"] == "<redacted-by-dba-skill>"
+
+
+def test_a_short_key_disables_the_substring_layer_and_says_so():
+    """★ 短 key 下子串那层必须关掉,**而且必须说出来**。
+
+    长度不是对的轴:实测 11 条命令 / 514KB 真实输出里,随机串 6 位起碰撞归零,
+    而词形串 `root` 子串命中 27 次、`prd` 588 次、`ha` 948 次 —— 整值命中全是 0。
+    所以拿一把 `prd` 这样的 key 去做子串匹配,会把一大片正常输出遮成看不懂的东西。
+
+    但**静默降级比静默过宽更危险**:过宽至少在输出里留下了标记,降级什么痕迹都没有 ——
+    遮蔽看起来仍在工作,只是少了一层。所以这条用例同时钉住"没遮"和"说了"。
+    """
+    payload = {"name": "rds-ali-fosun-infra-%s-mysql" % SHORT_KEY,     # 正常输出,含 key 子串
+               "note": "环境是 %s" % SHORT_KEY}
+    out, err = _redact(payload, SHORT_KEY)
+    assert out["name"].endswith("mysql"), "短 key 走了子串层,把正常字段遮了"
+    assert out["note"] == "环境是 %s" % SHORT_KEY
+    assert "子串兜底" in err and str(len(SHORT_KEY)) in err, \
+        "降级了却没说 —— 遮蔽看起来仍在工作,实际少了一层"
+
+
+def test_the_downgrade_notice_is_said_once_not_once_per_payload():
+    """一次性公告:每条命令刷一遍,提示多了就等于没有提示。"""
+    client_module._SHORT_KEY_ANNOUNCED = False
+    import io
+    from unittest import mock
+    err = io.StringIO()
+    with mock.patch.dict(client_module.os.environ, {"PROJECT_API_KEY": SHORT_KEY}), \
+            mock.patch.object(client_module.sys, "stderr", err):
+        for _ in range(3):
+            client_module._redact_outbound({"a": 1})
+    assert err.getvalue().count("子串兜底") == 1
