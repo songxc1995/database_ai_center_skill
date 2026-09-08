@@ -1128,6 +1128,17 @@ def _leaks(key: str, value: Any, parent_path: str) -> bool:
         return False
     if value.strip() == live:
         return True                      # 第一层:整值,无门槛
+    # ★ **不要在这里加 `len(value) >= len(live)` 之类的前置判断。** 看着像是能跳过绝大多数值,
+    #   实测反而**慢 2.2–2.4 倍**(真实语料,三种 key 长度结论一致):
+    #
+    #       12 位 key  直接 in 0.16ms | len 前置 0.34ms | 2.16×   (短于 key 的值占 53%)
+    #       48 位 key  直接 in 0.10ms | len 前置 0.22ms | 2.35×   (短于 key 的值占 95%)
+    #
+    #   ★ 48 位那行最说明问题:能"跳过"的比例高到 95%,它依然慢 —— 因为 `str.__contains__`
+    #   是 C 实现、**内部本来就先比长度**,短于针的字符串在 C 层直接返回。在外面再比一次,
+    #   等于把 C 里一条指令的事搬进解释器,每个值多付一次函数调用。想省的那步已经在更快的地方做过了。
+    #   顺带:脱敏本身不是瓶颈 —— 最大载荷(databases-search --all,13,264 个字符串 / 667KB)
+    #   实测 24ms,而取这份数据要几百毫秒到几秒。
     return len(live) >= _KEY_SUBSTRING_MIN and live in value   # 第二层:子串,有门槛
 
 
