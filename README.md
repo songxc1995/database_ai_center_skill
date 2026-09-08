@@ -63,6 +63,20 @@ ZABBIX_VERIFY_TLS=true
 > `SKILL.md` is the single authoritative prompt. If a one-file deliverable is ever needed for
 > a third party, generate it from `SKILL.md` rather than hand-maintaining a third copy.
 
+## Tests
+
+```bash
+python3 -m pip install -r requirements-dev.txt   # 只有 pytest;客户端本身零依赖
+python3 -m pytest tests -q
+```
+
+★ **写完用例请确认它在一台干净的机器上跑得起来。** 2026-09-08 这里躺着 15 条刚加的判据用例,
+而另一台机器上跑出的是 `No module named pytest` —— 仓库里没有任何东西说该装什么,README 也
+一个字没提。**安全网存在不等于安全网工作**:下一个人看到那句报错,大概率就跳过了。
+
+系统自带的 python3 可能是 3.9(macOS)。用例与客户端都兼容 3.9,但 `pytest` 需要自己装;
+不想污染系统环境就先建 venv。
+
 ## Compatibility Notes
 
 - This repository targets Database AI Center `v2.0.21+` and degrades cleanly on older servers (404/empty) — every capability below is optional, not required:

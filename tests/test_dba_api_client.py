@@ -1475,3 +1475,128 @@ class YearCoverageTest(unittest.TestCase):
 
     def test_a_non_numeric_year_does_not_crash(self):
         self._reasons([self._year("FY26")], self._months("2026", range(1, 4)))
+
+
+class YearCoveragePropertyTest(unittest.TestCase):
+    """把整个形状空间对着一个**独立 oracle** 扫一遍,而不是手挑几个点。
+
+    上面那 15 条是照着已经找到的四个洞写的 —— 它们能防这四个复发,防不住第五个。而这段判据
+    在四轮里被找出四个洞,每一个都是"我们只想到自己想得到的形状"。所以这里换打法:
+
+    oracle 从**另一个角度**描述同一件事,不复用实现里的任何概念(没有 lo_ok/hi_ok/is_first/
+    is_now,也不分年份角色)。它只问一句:**整条序列从第一个账期跑到最后一个应有的账期,
+    落在这一年里的月份,是不是都在?** 少一个就是缺口。
+
+    两边独立地算同一个事实,不一致就是有一方错了 —— 这比"我写用例、我自己挑形状"强的地方在于,
+    它不依赖我事先知道哪里会错。
+    """
+
+    @staticmethod
+    def _oracle_gap(cycles, year, now):
+        """这一年**应该**有哪些月?缺了就是缺口。与实现不共享任何代码。
+
+        序列的起点 = 观测到的最早账期(在那之前本来就没有数据)。
+        序列的终点 = 当前月减一(当月账期可能还没出账)。
+        """
+        if not cycles:
+            return False
+        first = min(cycles)
+        last = (now.year, now.month - 1) if now.month > 1 else (now.year - 1, 12)
+        expected = {
+            m for m in range(1, 13)
+            if first <= (year, m) <= last
+        }
+        return bool(expected - {m for (y, m) in cycles if y == year})
+
+    def _reasons(self, cycles, now):
+        import datetime as _dt
+        from unittest import mock
+
+        class _Frozen(_dt.datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return now
+
+        years = sorted({y for (y, _) in cycles})
+        payload_years = [{"year": str(y), "gross": 10.0, "paid": 5.0, "coupon": 0.0} for y in years]
+        months = [{"cycle": "%04d-%02d" % (y, m)} for (y, m) in sorted(cycles)]
+        with mock.patch.object(client_module, "datetime", _Frozen):
+            return {r["year"]: r.get("partial_reason")
+                    for r in client_module._year_on_year(payload_years, months)}
+
+    #: 判据认定"这一年少了账期"的那些原因。awaiting_final_cycle 也在里面:它是同一个事实的
+    #: 另一个名字(账单在途),不是"没有缺"——把它算成不缺,就等于承认那条宽限是消音。
+    GAP_REASONS = {"missing_months", "awaiting_final_cycle"}
+
+    @staticmethod
+    def _in_the_future(cycles, now):
+        """账期晚于当前月 = 未来数据。
+
+        ★ 这类形状**被显式排除在穷举之外**,而不是让它悄悄通过:账单是为已结束的周期出的,
+        平台产不出未来账期,所以两边在这个区域各说各话都不算错(实现说"那你缺了 1 月",
+        oracle 说"这一年还什么都不该有")。为一个谁都没决定过的行为写断言,只会把测试变成
+        实现的复读机。**排除的是形状,不是问题** —— 边界写在这里,下次真出现了能查到。
+        """
+        return any((y, m) > (now.year, now.month) for (y, m) in cycles)
+
+    def test_gap_detection_matches_an_independent_oracle(self):
+        """连续区间 × 年份角色 × 当前月的穷举对判。"""
+        import datetime as _dt
+        checked = 0
+        for now_month in range(1, 13):
+            now = _dt.datetime(2026, now_month, 15)
+            for lo in range(1, 13):
+                for hi in range(lo, 13):
+                    for prior in ([], [(2025, m) for m in range(1, 13)]):
+                        cycles = prior + [(2026, m) for m in range(lo, hi + 1)]
+                        if self._in_the_future(cycles, now):
+                            continue
+                        reasons = self._reasons(cycles, now)
+                        got_gap = reasons.get("2026") in self.GAP_REASONS
+                        want_gap = self._oracle_gap(cycles, 2026, now)
+                        checked += 1
+                        self.assertEqual(
+                            got_gap, want_gap,
+                            "now=%s 2026年 %d..%d prior=%s → reason=%r,oracle 说 gap=%s"
+                            % (now_month, lo, hi, bool(prior), reasons.get("2026"), want_gap))
+        self.assertGreater(checked, 700, "扫描面积缩水了,这条就不再是穷举")
+
+    def test_any_hole_is_always_a_gap(self):
+        """有洞一律是缺口 —— 这一条没有例外,不依赖年份角色或当前月。
+
+        单独列出来是因为它是最不该被任何"放宽"吃掉的性质:上面四个洞里有三个都是放宽放过头,
+        而放宽只该解释**两端**,永远不该解释**中间**。
+        """
+        import datetime as _dt
+        import itertools
+        now = _dt.datetime(2026, 9, 15)
+        checked = 0
+        for size in (3, 4, 5):
+            for combo in itertools.combinations(range(1, 13), size):
+                if max(combo) - min(combo) + 1 == len(combo):
+                    continue  # 连续的,不是这条要管的
+                reasons = self._reasons([(2026, m) for m in combo], now)
+                checked += 1
+                self.assertEqual(reasons.get("2026"), "missing_months",
+                                 "月份 %s 中间有洞却没报缺口" % (combo,))
+        self.assertGreater(checked, 500)
+
+    def test_a_label_never_claims_something_untrue(self):
+        """标签宣称的事实必须成立 —— 说 series_start 就得真是最早年且不从 1 月起,
+        说 in_progress 就得真是当前年且没到 12 月。第四个洞正是标签说了它没做的事。"""
+        import datetime as _dt
+        for now_month in (1, 6, 12):
+            now = _dt.datetime(2026, now_month, 15)
+            for lo in range(1, 13):
+                for hi in range(lo, 13):
+                    for prior in ([], [(2025, m) for m in range(1, 13)]):
+                        cycles = prior + [(2026, m) for m in range(lo, hi + 1)]
+                        if self._in_the_future(cycles, now):
+                            continue
+                        reason = self._reasons(cycles, now).get("2026")
+                        is_first = not prior
+                        if reason in ("series_start", "series_start_in_progress"):
+                            self.assertTrue(is_first, "非最早年却自称 series_start")
+                            self.assertNotEqual(lo, 1, "从 1 月起却自称 series_start")
+                        if reason in ("year_in_progress", "series_start_in_progress"):
+                            self.assertNotEqual(hi, 12, "已到 12 月却自称 in_progress")
