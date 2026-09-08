@@ -1977,9 +1977,13 @@ def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
             payload.get("years"), months if isinstance(months, list) else None
         )
         payload["year_on_year_basis"] = (
-            "pct/delta 按 gross(原价);paid_pct/paid_delta 是现金口径,受代金券扭曲——"
-            "券多的年份看着暴跌、券用尽的年份看着暴涨,不能当趋势读。"
-            "partial=true 的年份未满 12 个月,不可与整年直接比。"
+            "pct/delta 按 **net_consumption = paid + coupon**(= 原价−折扣−舍入,按我们实际"
+            "谈到的价格消耗了多少)。gross_pct 是目录价口径,看不见折扣率的变化;"
+            "paid_pct 是现金口径,受代金券时机扭曲——券多的年份看着暴跌、券用尽的年份看着暴涨。"
+            "三者都给出但只有 pct 是趋势。"
+            "partial=true 的年份未满 12 个月,不可与整年直接比;partial_reason 区分"
+            "series_start(数据起点,永不补齐)/ year_in_progress(会自己补齐)/ "
+            "**missing_months(中间年份缺月 = 账单数据缺口,要去查)**。"
         )
     return payload
 
@@ -1988,12 +1992,22 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     """Δ vs the previous year, per year. Hand-computing this was the most repeated follow-up
     to this command.
 
-    ``pct`` follows **gross** (原价), not ``paid``. ``paid`` is already net of vouchers, so a
-    year that burns a large coupon balance reads as a collapse in spend and the year the
-    coupons run out reads as a surge. Production: 2025 paid −67.1% against gross +0.5%, and
-    2026 paid +40.9% against gross −42.4% — a yoy on ``paid`` alone points the **opposite
-    way from the truth in both of the most recent years**. ``paid_pct`` is still reported,
-    labelled separately, because cash-out is a real question; it is just not the trend.
+    ``pct`` follows **net consumption = paid + coupon**, which is 原价 − 折扣 − 舍入: what the
+    fleet consumed at the prices we actually negotiated.
+
+    Neither of the two obvious candidates is right on its own:
+
+    * ``paid`` is already net of vouchers, so a year that burns a large coupon balance reads as
+      a collapse and the year the coupons run out reads as a surge. Production 2025: paid
+      −67.1% while consumption barely moved.
+    * ``gross`` is **list price**, before contract discount, so it calls a better-negotiated
+      rate "no change". Production 2025: gross +0.5% while net consumption fell 5.7% — the
+      effective discount had moved from 47.8% to 44.9%, and gross cannot see that.
+
+    Net consumption is immune to both: vouchers cancel out (they are inside it), and the
+    contract discount is already applied. ``gross_pct`` and ``paid_pct`` are reported beside
+    it, separately named, because "what was the list price trend" and "what did we pay in
+    cash" are both real questions — they are just not *the* trend.
 
     A year still in progress is marked ``partial`` with its ``months_covered``. Comparing 8
     months against 12 is not a −33% trend, and the caller cannot see the month count from the
@@ -2010,30 +2024,47 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 cycle = str(m.get("cycle") or "")
                 if len(cycle) >= 4:
                     covered[cycle[:4]] = covered.get(cycle[:4], 0) + 1
+    known_years = [str(r.get("year")) for r in years if isinstance(r, dict)]
+    first_year = known_years[0] if known_years else None
+    last_year = known_years[-1] if known_years else None
+
+    def _pct(cur: Any, prev: Any) -> tuple[Any, Any]:
+        if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)):
+            return None, None
+        # 上一年为 0 时同比无定义 —— 报 None 而不是 0%,后者读起来像"没变化"。
+        return round(cur - prev, 2), (round((cur - prev) / prev * 100, 1) if prev else None)
+
     out = []
-    prev_gross = prev_paid = None
+    prev_gross = prev_paid = prev_net = None
     for row in years:
         if not isinstance(row, dict):
             continue
-        year = row.get("year")
-        gross, paid = row.get("gross"), row.get("paid")
-        entry = {"year": year, "gross": gross, "paid": paid, "coupon": row.get("coupon")}
-        n = covered.get(str(year))
+        year = str(row.get("year"))
+        gross, paid, coupon = row.get("gross"), row.get("paid"), row.get("coupon")
+        net = (paid + coupon) if isinstance(paid, (int, float)) and isinstance(coupon, (int, float)) else paid
+        entry = {"year": row.get("year"), "gross": gross, "paid": paid, "coupon": coupon,
+                 "net_consumption": round(net, 2) if isinstance(net, (int, float)) else None}
+        n = covered.get(year)
         if n is not None:
             entry["months_covered"] = n
             if n < 12:
                 entry["partial"] = True
-        if isinstance(gross, (int, float)) and isinstance(prev_gross, (int, float)):
-            entry["delta"] = round(gross - prev_gross, 2)
-            # 上一年为 0 时同比无定义 —— 报 None 而不是 0%,后者读起来像"没变化"。
-            entry["pct"] = round((gross - prev_gross) / prev_gross * 100, 1) if prev_gross else None
-        if isinstance(paid, (int, float)) and isinstance(prev_paid, (int, float)):
-            entry["paid_delta"] = round(paid - prev_paid, 2)
-            entry["paid_pct"] = round((paid - prev_paid) / prev_paid * 100, 1) if prev_paid else None
+                # ★ 三种 <12 个月,处置完全不同 —— 合成一个 partial 会把第三种(真缺口)
+                #   伪装成前两种(正常边界)。
+                entry["partial_reason"] = (
+                    "series_start" if year == first_year        # 数据起点,永远不会补齐
+                    else "year_in_progress" if year == last_year  # 今年还没过完,会自己补齐
+                    else "missing_months"                        # ★ 中间年份缺月 = 账单数据缺口,要查
+                )
+        entry["delta"], entry["pct"] = _pct(net, prev_net)
+        entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
+        entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
         if isinstance(gross, (int, float)):
             prev_gross = gross
         if isinstance(paid, (int, float)):
             prev_paid = paid
+        if isinstance(net, (int, float)):
+            prev_net = net
         out.append(entry)
     return out
 
