@@ -225,6 +225,27 @@ Carry `generated_at` with any conclusion built on one, and re-run rather than re
 earlier answer. The same applies to `counts`: they describe the whole matched set, while
 `items` is one page — check `truncated` before treating a list as complete.
 
+## A cloud slow-log query is threshold-limited, and silence there is not health
+
+On cloud RDS the `slow_queries` probe cannot read `performance_schema` (the provider denies
+it), so the platform transparently falls back to the vendor's slow-log API. That fallback is
+correct, and it returns its own limitation alongside the rows:
+
+> ★仅覆盖超过 long_query_time 的慢 SQL——又快又频的 full-join 可能未被记录;如需全量需开通
+> DAS 企业版 SQL 洞察。
+
+**A small row count there is not evidence of health.** The slow log records what crossed a
+duration threshold; the workload that hurts most on these instances is the opposite shape —
+each statement under the threshold, run thousands of times, saturating IO. Production has
+this exact case: one instance produced 108 of 119 `full_join` alerts on the fleet while its
+slow log stayed quiet.
+
+The complement is `full_join_statements`, which reads `performance_schema` **per digest** and
+therefore does not care how fast any single execution was. Both are `supported` on cloud
+MySQL. When someone asks "does this instance have slow SQL", answer from both, and say which
+one produced what — reporting only the slow log answers a narrower question than the one
+asked, in the direction that reads as "fine".
+
 ## Metric values carry the platform's own doubts
 
 Rows from `metrics/{id}/latest` may include `data_quality` (`drift` / `outlier` /

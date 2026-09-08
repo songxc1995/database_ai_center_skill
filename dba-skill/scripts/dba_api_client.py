@@ -481,6 +481,36 @@ def _counts_only(payload: Any) -> Any:
     return out
 
 
+#: 只影响**怎么输出**、不影响**问了什么**的旗标。回显过滤条件时要排掉它们。
+_OUTPUT_ONLY_DESTS = {
+    "all", "max_pages", "snapshot", "since", "only_if_changed", "group_by", "sort_by",
+    "desc", "count_only", "summary_only", "fields", "format", "func", "command",
+    "_needs_instance", "refresh",
+}
+
+
+def _applied_filters(args: argparse.Namespace) -> dict[str, Any]:
+    """这一次实际带上的过滤条件。
+
+    ``alerts --severity nosuch`` 返回的是 ``{"counts": {全 0}, "items": [], "total": 0}`` ——
+    和"确实没有告警"**一个字都不差**。打错一个词表值,换来的是一个理直气壮的 0。
+
+    有限词表(如 ``--severity``)加 ``choices`` 就能在参数解析时响掉;但 ``--environment`` /
+    ``--metric-name`` / ``--levels`` 这些是**部署相关或会增长的**,硬编码 choices 会拒掉合法的
+    新值。对它们,正确做法是把条件回显出来:"我按 X 过滤,得到 0 条"和"总共就是 0 条"于是
+    可区分。平台侧 ``databases-search`` 早就这么做了(返回 ``filters``),这里把同一件事补给
+    其余命令。
+    """
+    out: dict[str, Any] = {}
+    for key, value in vars(args).items():
+        if key in _OUTPUT_ONLY_DESTS or key.startswith("_"):
+            continue
+        if value is None or value is False or value == []:
+            continue
+        out[key] = value
+    return out
+
+
 def _lists_present(payload: Any) -> list[str]:
     """这个响应里**实际**存在的列表键(顶层,含一层嵌套)。
 
@@ -723,7 +753,8 @@ def _snapshot_fingerprint(argv: list[str]) -> str:
     # another way — which surfaces as "no snapshot" for a snapshot that plainly exists.
     skip_with_value = {"--fields", "--format", "--sort-by", "--group-by", "--since",
                        "--max-pages"}
-    skip_flags = {"--snapshot", "--desc", "--count-only", "--all", "--only-if-changed"}
+    skip_flags = {"--snapshot", "--desc", "--count-only", "--summary-only", "--all",
+                  "--only-if-changed"}
     parts, i = [], 0
     while i < len(argv):
         token = argv[i]
@@ -2331,7 +2362,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="Current alerts, flat, instance inlined (v3.32+; prefer over alerts-list)",
     )
     alerts_v2.add_argument("--status", default="active", choices=["active", "resolved", "all"])
-    alerts_v2.add_argument("--severity")
+    alerts_v2.add_argument("--severity", choices=["low", "medium", "high", "critical"],
+                            help="Alert severity. Closed vocabulary — the response's own "
+                                 "`counts` enumerates it, so a typo must not come back as a 0.")
     alerts_v2.add_argument("--instance-id", type=int)
     alerts_v2.add_argument(
         "--instance-ids",
@@ -2395,7 +2428,9 @@ def build_parser() -> argparse.ArgumentParser:
     alerts = sub.add_parser("alerts-list")
     alerts.add_argument("--status", default="active")
     alerts.add_argument("--all-statuses", action="store_true")
-    alerts.add_argument("--severity")
+    alerts.add_argument("--severity", choices=["low", "medium", "high", "critical"],
+                            help="Alert severity. Closed vocabulary — the response's own "
+                                 "`counts` enumerates it, so a typo must not come back as a 0.")
     alerts.add_argument("--tenant-id")
     alerts.add_argument("--instance-id", type=int)
     alerts.add_argument(
@@ -2696,6 +2731,13 @@ def main(argv: list[str] | None = None) -> int:
         payload = _fan_out(args, _parse_instance_ids(ids_raw))
     else:
         payload = args.func(args)
+    # 回显的是**生效的查询**,包含没被显式传入的默认值 —— 默认值恰恰是最该说出来的那部分:
+    # 问"有告警吗"拿到 0,你得知道它只看了 status=active、且封顶 limit=200。
+    # 不覆盖服务端自己给的 `filters`(databases-search 已经有了),那份是权威。
+    _filters = _applied_filters(args)
+    if _filters and isinstance(payload, dict) and "filters" not in payload:
+        payload = {**payload, "applied_filters": _filters}
+
     fresh = payload  # what the server just said, before any diffing rewrites `payload`
 
     since_raw = getattr(args, "since", None)

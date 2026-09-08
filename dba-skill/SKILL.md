@@ -181,6 +181,19 @@ For live evidence drill-down (Database AI Center `v2.19.0+`, server `AI_DIAGNOST
 
 1. Use `probe-catalog --instance-id N` to discover the probes the engine supports and which param each needs.
 2. Run no-parameter snapshot probes first (`probe-run --probe slow_queries|active_sessions|blocking_chain|wait_events|locks|long_transactions|session_waits|resource_pressure`). `probe-catalog` is authoritative — the engine also exposes targeted probes, e.g. `full_join_statements` (MySQL: the per-digest SQL behind a `mysql_select_full_join_high` no-index-join alert), `error_statements` (TiDB: recently failing statements), and `db_error_log` (ELK-backed error log by host+window). **Oracle exposes a whole family the MySQL/TiDB examples above never hint at** — space (tablespace usage, per-owner and top segments, datafile autoextend), recoverability (FRA usage, archivelog status), and object health (invalid objects, failed scheduler jobs). Do not guess their names: `probe-catalog --instance-id N` returns the exact set for that engine with a `supported` flag on each.
+★ **On cloud RDS, `slow_queries` is the slow *log*, and a slow log has a threshold.** The
+platform falls back to the vendor's slow-log API there and returns the limitation with the
+data: *"仅覆盖超过 long_query_time 的慢 SQL——又快又频的 full-join 可能未被记录;如需全量需开通
+DAS 企业版 SQL 洞察"*. So **2 rows, or 0 rows, does not mean "this instance is fine"** — the
+queries that are individually fast but run constantly are exactly the ones the threshold hides,
+and they are the ones that saturate IO.
+
+The platform already ships the other half: **`full_join_statements`** reads
+`performance_schema` per digest, so it sees no-index joins regardless of how fast each one is.
+When the question is "does this instance have slow SQL / is it healthy", run **both** — one
+alone answers a narrower question than the one that was asked. (`probe-catalog` confirms both
+are `supported` on cloud MySQL.)
+
 3. Drill down multi-round: take a `sql_id` from `slow_queries`/`active_sessions` → `probe-run --probe sql_plan --sql-id <id>` (check full scans / bad plans) → `probe-run --probe index_coverage --object-name <table>` and `probe-run --probe table_stats --object-name <table>` (are filter columns indexed? are optimizer stats stale?). Use `bind_values --sql-id <id>` for parameter-skew, `session_detail --session-id <id>` for one session.
 4. Pass params only via `--sql-id` / `--session-id` / `--object-name`; never construct SQL. The server validates and binds them.
 

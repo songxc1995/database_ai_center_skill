@@ -1,3 +1,4 @@
+import argparse
 import json
 import os
 import subprocess
@@ -123,7 +124,14 @@ class DbaApiClientTest(unittest.TestCase):
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {"ok": True})
+        body = json.loads(result.stdout)
+        # 服务端说的原样保留……
+        self.assertEqual(body["ok"], True)
+        # ……外加**生效的查询**回显。没有它,`--type nosuch` 返回的空列表和"确实没有"
+        # 一个字都不差:打错一个词表值,换来的是一个理直气壮的 0。
+        self.assertEqual(body["applied_filters"]["type"], "application")
+        self.assertEqual(body["applied_filters"]["search"], "Pay")
+        self.assertEqual(body["applied_filters"]["limit"], 5)
         request = RecordingHandler.requests[0]
         self.assertEqual(request["method"], "GET")
         self.assertEqual(request["path"], "/api/v2/dba/directory/options")
@@ -1464,6 +1472,34 @@ class YearCoverageTest(unittest.TestCase):
         self.assertEqual(got["2021"], "series_start")
         self.assertEqual(got["2026"], "year_in_progress")
 
+    def test_reverse_order_does_not_change_a_single_yoy_number(self):
+        """★ 标签只是顺序防线守住的**一半**,而且是不承重的那一半。
+
+        `earliest = min()` 和"等于当前年"都是**按值**比较的,倒序下标签本来就对 —— 所以上面
+        那条用例即使把 `sorted` 整条拆掉也照样绿。真正依赖顺序的是 `prev_*` 累加,也就是
+        **每一个 pct/delta**:实测把 sorted 去掉后,倒序输入下三年的同比全部算错
+        (+25.0/−40.0 变成 +66.7/−20.0),而当时 94 条用例一条都没响。
+
+        变异测试是这么发现的:用例跑绿不等于它能抓回归 —— 得把防线拆掉看它响不响。
+        """
+        rows = [{"year": "2024", "gross": 80.0, "paid": 80.0, "coupon": 0.0},
+                {"year": "2025", "gross": 100.0, "paid": 100.0, "coupon": 0.0},
+                {"year": "2026", "gross": 60.0, "paid": 60.0, "coupon": 0.0}]
+        months = (self._months("2024", range(1, 13)) + self._months("2025", range(1, 13))
+                  + self._months("2026", range(1, 13)))
+
+        def numbers(years):
+            out = client_module._year_on_year(years, months)
+            return {r["year"]: (r.get("pct"), r.get("delta"),
+                                r.get("gross_pct"), r.get("paid_pct")) for r in out}
+
+        forward = numbers(rows)
+        self.assertEqual(forward["2025"][0], 25.0)   # 80 → 100
+        self.assertEqual(forward["2026"][0], -40.0)  # 100 → 60
+        self.assertEqual(numbers(list(reversed(rows))), forward,
+                         "服务端换个顺序返回,同比数字就变了")
+        self.assertEqual(numbers([rows[1], rows[2], rows[0]]), forward, "乱序同理")
+
     def test_no_month_series_says_so_instead_of_looking_complete(self):
         """没有月度序列就无法判断完整性。此前整个 partial 机制静默消失,每年都像完整的 ——
         「查不了」和「没问题」必须是两种可见的答案。"""
@@ -1600,3 +1636,46 @@ class YearCoveragePropertyTest(unittest.TestCase):
                             self.assertNotEqual(lo, 1, "从 1 月起却自称 series_start")
                         if reason in ("year_in_progress", "series_start_in_progress"):
                             self.assertNotEqual(hi, 12, "已到 12 月却自称 in_progress")
+
+
+class AppliedFiltersTest(unittest.TestCase):
+    """打错一个受控词表的值,不能换来一个理直气壮的 0。
+
+    `alerts --severity nosuch` 曾经返回 `{"counts": {全 0}, "items": [], "total": 0}` ——
+    和"确实没有告警"一个字都不差。两条修法,按参数的性质分:
+
+    * **闭合词表**(severity:响应自己的 `counts` 就列着 low/medium/high/critical)→ `choices=`,
+      在参数解析时就响掉。
+    * **部署相关或会增长的**(environment / metric-name / levels)→ **不能**硬编码 choices,
+      那会拒掉合法的新值;改为回显生效的查询,让"我按 X 过滤得到 0"和"总共就是 0"可区分。
+
+    回显的是**生效的查询**而非"用户显式传了什么":默认值恰恰最该说出来 —— 问"有告警吗"
+    拿到 0,你得知道它只看了 `status=active`。
+    """
+
+    def test_a_closed_vocabulary_rejects_a_typo_instead_of_returning_zero(self):
+        import subprocess
+        for command in ("alerts", "alerts-list"):
+            result = subprocess.run(
+                [sys.executable, str(CLIENT), command, "--severity", "nosuch"],
+                capture_output=True, text=True,
+                env={**os.environ, "PROJECT_API_BASE_URL": "http://127.0.0.1:1", 
+                     "PROJECT_API_KEY": "x"},
+            )
+            self.assertNotEqual(result.returncode, 0, command)
+            self.assertIn("invalid choice", result.stderr, command)
+            self.assertIn("critical", result.stderr, "报错里没列出合法值")
+
+    def test_output_flags_are_not_echoed_as_filters(self):
+        """`--format` / `--fields` 影响的是怎么输出,不是问了什么。把它们混进
+        applied_filters,会让人以为结果被它们筛过。"""
+        args = argparse.Namespace(
+            severity="high", format="table", fields="a,b", count_only=True,
+            sort_by="x", func=lambda a: None, _needs_instance=False,
+        )
+        got = client_module._applied_filters(args)
+        self.assertEqual(got, {"severity": "high"})
+
+    def test_commands_with_no_filters_stay_untouched(self):
+        args = argparse.Namespace(format="json", count_only=False, func=lambda a: None)
+        self.assertEqual(client_module._applied_filters(args), {})
