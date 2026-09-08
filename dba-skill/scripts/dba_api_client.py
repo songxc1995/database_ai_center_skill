@@ -1059,6 +1059,10 @@ def _csv_cell(value: Any) -> str:
     return str(value)
 
 
+# 嵌套对象在表格里占一格,超过这个宽度就截断。csv/json 从不截断 —— 只有 table 会。
+_CELL_MAX = 60
+
+
 def _print_table(payload: Any) -> bool:
     """Render a collection as columns. Returns False when the payload is not tabular."""
     items, _ = _envelope(payload)
@@ -1074,6 +1078,23 @@ def _print_table(payload: Any) -> bool:
     sys.stdout.write("  ".join("-" * widths[c] for c in columns) + "\n")
     for row in items:
         sys.stdout.write("  ".join(_cell(row.get(c)).ljust(widths[c]) for c in columns).rstrip() + "\n")
+
+    # ★ 被截断的那些列必须自己说出来。table 是三种输出里**唯一会丢内容**的一种
+    # (csv/json 都是完整的),而丢在哪儿只有渲染这一刻知道 —— 读的人手里只有一格看着
+    # 像是完整值的文本。topology 是现成的例子:from/to 是十几个键的对象,一格根本装不下,
+    # 于是表格看起来齐整、实际每行都缺东西。
+    nested = [c for c in columns
+              if any(isinstance(r.get(c), (dict, list))
+                     and len(json.dumps(r.get(c), ensure_ascii=False)) > _CELL_MAX
+                     for r in items)]
+    if nested:
+        sys.stderr.write(
+            "[table] ★ %s 是嵌套对象,这一格放不下已被截断(行尾的 … 就是截断处)。"
+            "表格是唯一会截断的输出:--format csv / json 是完整的。"
+            "想在表里看具体某个字段,用点路径把它拉成一列,例如 "
+            "--fields %s\n" % (
+                "、".join(nested),
+                ",".join("%s.name" % c for c in nested[:2]) or "<列>.<字段>"))
     return True
 
 
@@ -1081,7 +1102,11 @@ def _cell(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, (dict, list)):
-        return json.dumps(value, ensure_ascii=False)[:60]
+        text = json.dumps(value, ensure_ascii=False)
+        # ★ 截断要留痕。原来是直接 [:60],切完的 JSON 读起来**像一个完整的值**
+        # (末尾正好落在 } 或引号上时尤其像),于是"这格还有内容没显示"和"这格就这么多"
+        # 长得一模一样 —— 本项目的头号反模式,在最不起眼的一个函数里。
+        return text if len(text) <= _CELL_MAX else text[:_CELL_MAX - 1] + "…"
     return str(value)
 
 
@@ -1853,28 +1878,29 @@ def cmd_topology(args: argparse.Namespace) -> Any:
             return {"ref": ref, "external": True, "endpoint": ref[4:], "name": None,
                     "note": "未纳管主机——平台只知道地址,没有它的指标/备份/负责人"}
         node = nodes.get(ref) or {}
-        # ★ 透出节点上**所有有判断价值**的字段,别挑五个。第一版只留了 5/12,丢掉的里面有:
-        #   role_detail  —— 143 个 instance_role="primary" 被它拆成 primary 44 / source 98 /
-        #                   mgr_primary 1。**MGR 主库和普通异步主库的运维动作不一样**,
-        #                   只给 instance_role 等于把这个区分抹平。
-        #   is_rac / node_count —— 227 个节点里 14 个 is_rac=true,在实实在在地丢数据。
-        #   role_conflict —— 今天全 false,但"两个节点都自称主"正是拓扑工具最不该静默丢的那个。
-        # host/port/id 与 ref 冗余,仍然带上:让下游能不回头查就做连接。
+        # ★ **透传,不是白名单。** 第一版挑了 5/12 个键,丢掉的里面有 role_detail(143 个
+        #   instance_role="primary" 被它拆成 primary 44 / source 98 / mgr_primary 1 ——
+        #   MGR 主库和普通异步主库的运维动作不一样)和 is_rac(227 个节点里 14 个为真)。
+        #   第二版把名单补齐到 12 个,**但那仍然是白名单**:平台哪天加第 13 个键,
+        #   它照样被丢,而且用例里的 `set(node)` 取自测试夹具、不是平台产出,所以**测试照样绿**。
+        #   白名单的问题测试补不上,只能靠结构:默认全带过来,只显式改写我自己算出来的那两个。
+        #   丢掉 id 是因为 ref 就是它(边上引用的就是这个值),留着只会让人以为是两个东西。
         out = {"ref": ref, "external": bool(node.get("external"))}
-        for key in ("name", "engine", "instance_role", "role_detail", "role_conflict",
-                    "node_count", "is_rac", "cluster_id", "host", "port"):
-            out[key] = node.get(key)
+        out.update({k: v for k, v in node.items() if k not in ("id", "ref", "external")})
         return out
 
     focus = _resolve_instance_id(args)
     rows = []
     for e in edges:
-        row = {"kind": e.get("kind"), "sync_state": e.get("sync_state"),
-               "from": side(e.get("from")), "to": side(e.get("to"))}
-        # 平台标了"这条边是靠地址猜的"就带上 —— 这个标记存在的全部理由就是让人看得见,
-        # 在这里丢掉等于把它加了个寂寞。(第一版就是这么丢的:平台标 2 条,我这儿显示 0 条。)
-        if e.get("resolved_by"):
-            row["resolved_by"] = e["resolved_by"]
+        # 同样是透传:边上除了 from/to(要换成解析后的对象)以外的字段一律原样带过去。
+        # `resolved_by`(平台标"这条边是靠地址猜的")第一版就是这么丢掉的 —— 平台标 2 条、
+        # 我这儿显示 0 条;那个标记存在的全部理由就是让人看得见。补进白名单只能挡住这一个,
+        # 透传才能挡住下一个。
+        row = {"kind": e.get("kind"), "sync_state": e.get("sync_state")}
+        row.update({k: v for k, v in e.items()
+                    if k not in ("from", "to", "kind", "sync_state")})
+        row["from"] = side(e.get("from"))
+        row["to"] = side(e.get("to"))
         if focus is not None and focus not in (e.get("from"), e.get("to")):
             continue
         if args.external_only and not (row["from"]["external"] or row["to"]["external"]):
@@ -1943,7 +1969,13 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
         reason = body.get("message") or body.get("detail") or (_LAST_HTTP_BODY or "")[:400]
         out = {
             "instance_id": instance_id,
-            "points": [],
+            # ★ 集合键必须和成功路径**同名**。上一轮把成功路径从 points 改成 items,
+            # 这条 422 路径没跟着改,于是同一条命令返回两种形状:调用方写 out["items"],
+            # 正常时拿到数据,一遇到 422 就 KeyError 或静默拿不到。
+            # SKILL.md 自己写着「集合可能落在 items / rows / ... 猜错就是运行时崩溃」——
+            # 结果同一条命令自己就给了两种。item_kind 也一并给出,让空集合仍能自证是什么的空集合。
+            "items": [],
+            "item_kind": "metric_point",
             "unavailable": True,
             "reason": reason,
         }

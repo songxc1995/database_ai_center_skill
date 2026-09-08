@@ -1752,7 +1752,10 @@ class TopologyAndSeriesHelperTest(unittest.TestCase):
         self.assertTrue(out["unavailable"])
         self.assertIn("aggregates", out["reason"])
         self.assertIn("不是调用失败", out["hint"])
-        self.assertEqual(out["points"], [])
+        # ★ 集合键必须和成功路径一致。原来断言的是 out["points"],于是成功路径改名成 items 时
+        # 这条不会红 —— 用例在替错误站岗,而它守的恰恰是"形状要稳定"。
+        self.assertEqual(out["items"], [])
+        self.assertNotIn("points", out, "422 路径又用回了另一个集合键名")
 
 
 class SeriesHintIsConditionalTest(unittest.TestCase):
@@ -1891,16 +1894,17 @@ class MetricSeriesUnknownVocabularyTest(unittest.TestCase):
         self.assertIn("这段时间没有数据", empty_window["summary"]["note"])
 
 
-def test_topology_does_not_drop_any_platform_field():
-    """★ 断言的是**键集**,不是某一条边有某个键。
+def test_topology_does_not_drop_a_field_the_fixture_declares():
+    """helper 不得丢弃夹具里**已知**的字段(下面那条管未知的)。
 
-    上一版写成"这条边有 resolved_by",于是它依赖"回落被触发"这个前提 —— 回落逻辑一变,
-    用例可能自己失效而没人发现。改成比对键集之后:任意一条边、任意一个节点都能当样本,
-    下一个被漏掉的字段也会被抓住,而不是只守住我当时想到的那一个。
+    ★ 名字里的"已知"是要紧的,而这正是这条用例的**局限**:`set(node)` 里的 node 是这条用例
+    自己写的夹具,不是平台产出。所以只靠它,平台新增第 13 个键时它照样绿 ——
+    它只知道我当初写下的那 12 个。原名叫 does_not_drop_any_platform_field,
+    那个名字承诺了它做不到的事。
 
-    这个缺口不是"将来会漏",是**现在就在漏**:第一版只透出 12 个节点键里的 5 个,
-    丢掉的里面有 role_detail(143 个 primary 被它拆成 primary/source/mgr_primary ——
-    MGR 主库和普通异步主库的运维动作不一样)和 is_rac(227 个节点里 14 个为真)。
+    补洞的不是"再写一条更聪明的用例"(夹具永远追不上平台),而是把 helper 从白名单改成透传:
+    见 test_topology_carries_through_a_key_it_has_never_heard_of —— 那条用例造一个
+    helper 代码里根本不存在的键,能过去就说明"下一个新增字段"这一类都能过去。
     """
     from unittest import mock
 
@@ -1918,12 +1922,91 @@ def test_topology_does_not_drop_any_platform_field():
     dropped_edge = set(payload["edges"][0]) - set(edge)
     assert not dropped_edge, "边上的字段被 helper 丢了:%s" % dropped_edge
 
-    # 节点侧:ref 取代了 id,其余都该在
+    # 节点侧:ref 取代了 id —— 所以显式断言 ref 在。原来只是把 id 豁免掉,
+    # 那样的话 helper 哪天连 ref 也不出了,这条仍然绿。
     carried = set(edge["to"])
+    assert "ref" in carried, "ref 没了,而 id 是被它取代才豁免的"
     dropped_node = set(node) - carried - {"id"}
     assert not dropped_node, "节点上的字段被 helper 丢了:%s" % dropped_node
     assert edge["to"]["role_detail"] == "mgr_primary", "role_detail 被抹平了"
     assert edge["to"]["is_rac"] is True
+
+    # ★ from 侧此前从头到尾没被检查过:夹具里 from=1 不在 nodes 里,走的是"未知节点"分支。
+    # 只断言一侧,等于另一侧完全没有守卫。
+    assert edge["from"]["ref"] == 1
+    assert set(edge["from"]) >= {"ref", "external"}
+
+
+def test_topology_carries_through_a_key_it_has_never_heard_of():
+    """★ 这条才是真正守住"下一个字段"的那条。
+
+    上面那条比对的是夹具里的键,夹具是我写的,所以它追不上平台。这条反过来:
+    造两个 **helper 源码里根本不出现**的键(平台"将来"新增的样子),断言它们原样到达。
+    白名单实现必然红,透传实现必然绿 —— 于是"平台加了字段 → 被静默丢掉"这一整类
+    (v3.67.1 的 resolved_by、第一版的 role_detail/is_rac,两次都是它)在结构上不再可能。
+
+    为什么不写成"对着平台声明比对":skill 仓库里**没有平台的声明**,它是独立仓库、
+    离线跑测试,拿不到 Pydantic 模型也拿不到 OpenAPI。硬造一份快照就成了第二个会漂移的
+    白名单 —— 那正是 [[dba-skill-state]] 里"追不上的清单比没有清单更危险"。
+    对声明的比对属于平台仓库,已在那边(TopologyEdgeOut/NodeOut 与 builder 产出键比对)。
+    """
+    from unittest import mock
+
+    node = {"id": 2, "name": "sby", "external": False,
+            "quorum_role": "voter", "readonly_reason": "planned"}   # ← 源码里不存在的两个键
+    payload = {"nodes": [node],
+               "edges": [{"from": 2, "to": 2, "kind": "replication",
+                          "lag_seconds": 12}]}                       # ← 边上也来一个
+    args = argparse.Namespace(instance_id=None, ip=None, host=None, external_only=False)
+    with mock.patch.object(client_module, "_request", return_value=payload):
+        out = client_module.cmd_topology(args)
+
+    for key in ("quorum_role", "readonly_reason", "lag_seconds"):
+        assert key not in Path(client_module.__file__).read_text(), (
+            "%s 已经出现在 helper 源码里了,这条用例就不再是在测'没听说过的键'" % key)
+
+    edge = out["items"][0]
+    assert edge["lag_seconds"] == 12, "边上的新字段被丢了"
+    assert edge["to"]["quorum_role"] == "voter", "节点上的新字段被丢了"
+    assert edge["to"]["readonly_reason"] == "planned"
+    # 透传不能把 ref/external 也覆盖掉
+    assert edge["to"]["ref"] == 2 and edge["to"]["external"] is False
+    assert "id" not in edge["to"], "id 与 ref 重复,应当只留 ref"
+
+
+def test_table_says_so_when_a_nested_cell_was_truncated():
+    """★ table 是三种输出里唯一会丢内容的一种,丢了就必须说。
+
+    `_cell` 原来是 `json.dumps(...)[:60]` —— 切完的 JSON 读起来像个完整的值,
+    尤其当截断处正好落在 `}` 或引号上。于是"这格还有内容"和"这格就这么多"长得一样,
+    又是同一个反模式,在最不起眼的一个函数里。topology 把它放大了:from/to 是十几个键的
+    对象,一格装不下,表格看起来齐整而每行都缺东西,--format csv 却是完整的。
+
+    两条断言分别管两件事:截断处**看得见**(…),以及**去哪儿拿完整值**(stderr 的出口)。
+    """
+    import io
+    from unittest import mock
+
+    wide = {"ref": 2, "name": "a-rather-long-instance-name", "engine": "postgres",
+            "instance_role": "primary", "role_detail": "mgr_primary", "is_rac": True}
+    payload = {"items": [{"kind": "replication", "to": wide}], "item_kind": "replication_edge"}
+    out, err = io.StringIO(), io.StringIO()
+    with mock.patch.object(client_module.sys, "stdout", out), \
+            mock.patch.object(client_module.sys, "stderr", err):
+        assert client_module._print_table(payload) is True
+
+    cell = [ln for ln in out.getvalue().splitlines() if "replication" in ln][-1]
+    assert "…" in cell, "截断了却没留痕,读的人无从知道这格是被切过的:%r" % cell
+    assert "csv" in err.getvalue() and "--fields" in err.getvalue(), \
+        "只说了被截断、没说去哪儿拿完整值,等于把人卡在半路"
+
+    # 装得下的就不该报 —— 每张表都跟一句警告,等于没有警告。
+    narrow = {"items": [{"kind": "replication", "to": {"ref": 2}}]}
+    out2, err2 = io.StringIO(), io.StringIO()
+    with mock.patch.object(client_module.sys, "stdout", out2), \
+            mock.patch.object(client_module.sys, "stderr", err2):
+        client_module._print_table(narrow)
+    assert err2.getvalue() == "", "没截断也报了:%r" % err2.getvalue()
 
 
 def test_topology_passes_through_the_inference_marker():
