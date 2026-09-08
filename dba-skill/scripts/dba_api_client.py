@@ -1982,7 +1982,28 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
         known = sorted({r.get("metric_name") for r in latest
                         if isinstance(r, dict) and r.get("metric_name")}) \
             if isinstance(latest, list) else []
-        if known and args.metric_name not in known:
+        if not known:
+            # ★ 三个分支,不是两个。第一版只写了后两个,于是**词表取不到时静默落回原样** ——
+            # 和修复前那个不区分的空一模一样。我在修"unknown 被当成 ok"的过程中,
+            # 自己又造了一个 unknown 被当成 ok。
+            # 触发时机还特别不巧:这次额外调用**只在空结果时发出**,也就是有人正在逐个试
+            # 指标名的时候 —— 恰恰是最容易撞限流的场景。
+            # fail-safe 的方向是"说我不知道",不是"回到不区分"。
+            out["unavailable"] = True
+            if _unavailable(latest):
+                out["reason"] = (
+                    "空结果无法归类:取这台实例的指标词表失败(HTTP %s),所以分不清 '%s' 是"
+                    "名字拼错了,还是这个指标确实在窗口内没有样本。**重试一次通常就能分清。**"
+                    % (_LAST_HTTP_STATUS, args.metric_name)
+                )
+            else:
+                # 词表本身是空的 —— 那不是"查不到",是"这台一个指标都没采到"。
+                # 和上面那种混成一句话,会让人去重试一个重试不好的问题。
+                out["reason"] = (
+                    "这台实例**一个指标都没有**(/latest 返回空),所以 '%s' 查不到并不说明"
+                    "名字有没有拼错 —— 先查这台的采集是不是停了。" % args.metric_name
+                )
+        elif args.metric_name not in known:
             out["unavailable"] = True
             out["reason"] = (
                 "'%s' 不在这台实例的指标词表里(它有 %d 个指标)。空结果在这里有两种含义,"
@@ -1990,7 +2011,7 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
                 % (args.metric_name, len(known))
             )
             out["known_metrics"] = known
-        elif known:
+        else:
             out["summary"]["note"] = (
                 "'%s' 在这台的指标词表里,但所选窗口内没有样本 —— 是**这段时间没有数据**,"
                 "不是这个指标没在采。" % args.metric_name

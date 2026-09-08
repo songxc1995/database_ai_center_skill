@@ -1839,3 +1839,53 @@ class MetricSeriesEmptyKindsTest(unittest.TestCase):
         items, meta = client_module._envelope(out)
         self.assertIsNotNone(items)
         self.assertEqual(meta.get("items_key"), "items")
+
+
+class MetricSeriesUnknownVocabularyTest(unittest.TestCase):
+    """★ 我在修「unknown 被当成 ok」的过程中,自己又造了一个 unknown 被当成 ok。
+
+    区分两种空的那段代码只写了两个分支(不在词表 / 在词表),**词表取不到时两个都不进,
+    静默落回原样** —— 和修复前那个不区分的裸空一模一样。
+
+    触发时机还特别不巧:那次额外的 `/latest` **只在空结果时才发出**,也就是有人正在逐个
+    试指标名的时候 —— 恰恰是最容易撞限流(全局 600/min)的场景。
+
+    ★ fail-safe 的方向是**「说我不知道」**,不是「回到不区分」。
+    """
+
+    def _run(self, metric, latest, status=429):
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=75, ip=None, host=None,
+                                  metric_name=metric, hours=24, granularity=None)
+
+        def fake(path, params=None):
+            return latest if path.endswith("/latest") else []
+
+        with mock.patch.object(client_module, "_try_get", side_effect=fake), \
+             mock.patch.object(client_module, "_LAST_HTTP_STATUS", status):
+            return client_module.cmd_metric_series(args)
+
+    def test_a_failed_vocabulary_lookup_says_it_could_not_tell(self):
+        out = self._run("zzz_nope", {"unavailable": True, "status_code": 429})
+        self.assertTrue(out["unavailable"], "词表取不到时静默落回了不区分的空")
+        self.assertIn("无法归类", out["reason"])
+        self.assertIn("429", out["reason"], "没说清是哪一种失败")
+        self.assertIn("重试", out["reason"], "没告诉调用方下一步能做什么")
+
+    def test_an_instance_with_no_metrics_at_all_is_a_different_answer(self):
+        """"取词表失败"和"这台一个指标都没采到"混成一句话,会让人去重试一个重试不好的问题。"""
+        out = self._run("zzz_nope", [])
+        self.assertTrue(out["unavailable"])
+        self.assertIn("一个指标都没有", out["reason"])
+        self.assertIn("采集是不是停了", out["reason"])
+        self.assertNotIn("重试", out["reason"])
+
+    def test_the_working_paths_still_distinguish_the_two_empties(self):
+        """守卫不能把正事挡了:词表正常时,两种空仍要分得清。"""
+        vocab = [{"metric_name": "qps"}]
+        typo = self._run("zzz_nope", vocab)
+        self.assertIn("不在这台实例的指标词表里", typo["reason"])
+        empty_window = self._run("qps", vocab)
+        self.assertNotIn("unavailable", empty_window)
+        self.assertIn("这段时间没有数据", empty_window["summary"]["note"])
