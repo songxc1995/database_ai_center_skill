@@ -1059,6 +1059,87 @@ def _csv_cell(value: Any) -> str:
     return str(value)
 
 
+# ★ 出站脱敏。SKILL.md 的 Safety Rules 写着不得输出用户名/口令/密钥/连接串,
+# 但那条规则此前**没有任何东西在执行它** —— `instance --instance-id 19` 今天就在
+# 吐 `instance.username = dbai_mon`(admin 与 ai-client 两种角色实测都吐)。
+#
+# 为什么做成收口处的黑名单而不是"我核过这个端点的输出没问题":后者是白名单思维的
+# 另一种写法,只能覆盖我当时看过的那几条命令(同伴扫了 10/37 条就发现了一处)。
+# 平台哪天在别的端点上多带一个 username,逐端点核查这套办法不会有任何反应。
+_SENSITIVE_KEYS = frozenset({
+    "username", "user_name", "db_user", "login", "password", "passwd", "pwd",
+    "secret", "token", "access_token", "api_key", "apikey", "private_key",
+    "dsn", "connection_string", "conn_string",
+})
+_SENSITIVE_SUFFIXES = ("_password", "_passwd", "_secret", "_token", "_api_key", "_apikey")
+_REDACTED = "<redacted-by-dba-skill>"
+
+# ★ 按键名遮蔽有一处会误伤:`credentials.per_key_source` 是**以变量名为键**的映射,
+#   键叫 PROJECT_API_KEY,值却是"这把 key 是从哪儿读到的"(`process environment` 或某个
+#   .env 的路径)。遮掉它等于把排查"到底哪把 key 在生效"唯一有用的字段抹了 ——
+#   而那正是上次「陈旧已吊销 key 污染每个 shell」查了半天的那个字段。
+#   豁免的依据不是"我信任这个端点",是**这段值由本文件自己构造**(cmd_whoami 里),
+#   取值只有固定几种措辞和文件路径,真正的 key 从不放进去。
+#   只豁免这一层父路径(不是前缀):再往下如果哪天多出嵌套,照样遮。
+_REDACTION_EXEMPT_PARENTS = frozenset({"credentials.per_key_source"})
+
+
+def _is_sensitive_key(key: str) -> bool:
+    low = key.lower()
+    return low in _SENSITIVE_KEYS or low.endswith(_SENSITIVE_SUFFIXES)
+
+
+def _leaks(key: str, value: Any, parent_path: str) -> bool:
+    """这一格该不该遮。
+
+    两条判据,第二条是兜底:键名像敏感字段(除非父路径在豁免名单里),**或者**值本身
+    逐字节等于当前这把 API key —— 后者不看字段叫什么,所以平台哪天把 key 回显在一个
+    叫 `note` 的字段里也拦得住。按名字遮永远只能拦住起对了名字的那些。
+    """
+    if value is None:
+        return False
+    if _is_sensitive_key(key) and parent_path not in _REDACTION_EXEMPT_PARENTS:
+        return True
+    live = os.environ.get("PROJECT_API_KEY", "").strip()
+    return bool(live) and isinstance(value, str) and live in value
+
+
+def _redact_outbound(payload: Any, _path: str = "", _found: list[str] | None = None) -> Any:
+    """把敏感字段的值换成显式标记,并在 stderr 说明动过哪几处。
+
+    两条刻意的选择:
+
+    ★ **换值,不是删键。** 删了键就等于说"平台没给这个字段",而那是假话;下游想知道
+      "这台配没配监控账号"时会得到反的答案。
+
+    ★ **None 原样保留。** "没配监控账号"和"配了但不给你看"是两件事,后者才需要遮。
+      一律换成标记会把前者也说成后者。
+    """
+    top = _found is None
+    if top:
+        _found = []
+    if isinstance(payload, dict):
+        out = {}
+        for key, value in payload.items():
+            here = f"{_path}.{key}" if _path else key
+            if _leaks(key, value, _path):
+                _found.append(here)
+                out[key] = _REDACTED
+            else:
+                out[key] = _redact_outbound(value, here, _found)
+        payload = out
+    elif isinstance(payload, list):
+        payload = [_redact_outbound(v, f"{_path}[{i}]", _found)
+                   for i, v in enumerate(payload)]
+    if top and _found:
+        # 悄悄改掉平台的答案比不改更糟 —— 读的人得知道这份输出被动过、动了哪几处。
+        shown = sorted(set(_found))
+        sys.stderr.write("[redacted] dba-skill 按自己的 Safety Rules 遮掉了 %d 处敏感字段:%s%s\n"
+                         % (len(_found), "、".join(shown[:5]),
+                            " 等" if len(shown) > 5 else ""))
+    return payload
+
+
 # 嵌套对象在表格里占一格,超过这个宽度就截断。csv/json 从不截断 —— 只有 table 会。
 _CELL_MAX = 60
 
@@ -1088,14 +1169,37 @@ def _print_table(payload: Any) -> bool:
                      and len(json.dumps(r.get(c), ensure_ascii=False)) > _CELL_MAX
                      for r in items)]
     if nested:
-        sys.stderr.write(
-            "[table] ★ %s 是嵌套对象,这一格放不下已被截断(行尾的 … 就是截断处)。"
-            "表格是唯一会截断的输出:--format csv / json 是完整的。"
-            "想在表里看具体某个字段,用点路径把它拉成一列,例如 "
-            "--fields %s\n" % (
-                "、".join(nested),
-                ",".join("%s.name" % c for c in nested[:2]) or "<列>.<字段>"))
+        # ★ 例子必须从**实际值**里取。第一版是往被截断的列名后面无脑拼 `.name`,
+        # 结果 5 条会给提示的命令里有 4 条照抄就报 "no such field(s)" ——
+        # `retire_exclusions` 是 list(点路径进不去)、`ai_review` 是 dict 但没有 name 键,
+        # 只有 topology 的节点恰好有 name。**提示让人去敲一个敲不通的东西**,
+        # 正是这一整轮在修的那个形状,只不过这次是我自己新种的。
+        # 取不到能用的例子就不给例子:宁可少一句,不要给一条假的。
+        examples = [e for e in (_dotted_example(items, c) for c in nested) if e]
+        how = ("想在表里看具体某个字段,用点路径把它拉成一列,例如 --fields %s。"
+               % ",".join(examples[:2])) if examples else \
+              ("这几列是数组或只含嵌套对象,点路径展不开(--fields 只能钻 dict 的标量键),"
+               "要完整内容就用 csv / json。")
+        sys.stderr.write("[table] ★ %s 是嵌套对象,这一格放不下已被截断(行尾的 … 就是截断处)。"
+                         "表格是唯一会截断的输出:--format csv / json 是完整的。%s\n"
+                         % ("、".join(nested), how))
     return True
+
+
+def _dotted_example(items: list[Any], column: str) -> str | None:
+    """给出一条**在这份数据上真能用**的点路径,给不出就返回 None。
+
+    判据就是 `_project` 用的那一条:`_dig` 能取到非 _MISSING 的标量。所以这里只认
+    "dict 里的标量键" —— 数组进不去,嵌套 dict 再往下钻对读表的人也没帮助。
+    """
+    for row in items:
+        value = row.get(column) if isinstance(row, dict) else None
+        if not isinstance(value, dict):
+            continue
+        for key, sub in value.items():
+            if sub is not None and not isinstance(sub, (dict, list)):
+                return "%s.%s" % (column, key)
+    return None
 
 
 def _cell(value: Any) -> str:
@@ -3038,6 +3142,9 @@ def main(argv: list[str] | None = None) -> int:
         payload = _fan_out(args, _parse_instance_ids(ids_raw))
     else:
         payload = args.func(args)
+    # ★ 脱敏放在**取回后立刻**,不是渲染时:--snapshot 会把 payload 原样写到磁盘,
+    #   放在渲染那一步等于快照文件里还留着。这里是所有命令唯一的收口处。
+    payload = _redact_outbound(payload)
     # 回显的是**生效的查询**,包含没被显式传入的默认值 —— 默认值恰恰是最该说出来的那部分:
     # 问"有告警吗"拿到 0,你得知道它只看了 status=active、且封顶 limit=200。
     # 不覆盖服务端自己给的 `filters`(databases-search 已经有了),那份是权威。

@@ -501,6 +501,13 @@ worth a lot less when these disagree.
 - Use only returned API data and returned Zabbix data.
 - Do not invent SQL, logs, topology events, metrics, owners, or contacts.
 - Do not request or emit database passwords, API keys, encrypted secrets, usernames, or full connection strings.
+  The client now enforces this at its output boundary instead of trusting the rule to be followed: any such
+  value is replaced with `<redacted-by-dba-skill>` and a one-line `[redacted] …` note names the paths on stderr.
+  **`<redacted-by-dba-skill>` is not a data problem** — the field exists and is set; you are just not shown it.
+  A `null` there still means genuinely unset. Two places emit it today: `instance` (`instance.username`) and
+  `elk-status` (`auth.username`). `whoami`'s `credentials.per_key_source` is deliberately NOT redacted:
+  its values say *where a key was read from* (`process environment`, a `.env` path), never the key itself,
+  and it is the only field that answers "which key am I actually using".
 - Do not query the local metadata database or scrape repository docs as a substitute for live Database AI Center API data.
 - Do not read or print `.env` directly. Use the helper so secrets stay out of chat logs.
 - Do not place API keys in shell commands. Rely on the helper's nearest `.env` loading, environment variables, or an external secret manager wrapper.

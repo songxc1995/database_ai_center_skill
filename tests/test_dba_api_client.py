@@ -1,4 +1,5 @@
 import argparse
+import io
 import json
 import os
 import subprocess
@@ -2069,3 +2070,122 @@ class SeriesNoteExplainsTheRealCauseTest(unittest.TestCase):
             summary = client_module.cmd_metric_series(args)["summary"]
         self.assertTrue(summary["deprecated"])
         self.assertIn("还是不是你要看的那个指标", summary["deprecated_note"])
+
+
+def test_the_dotted_path_example_in_the_truncation_hint_actually_resolves():
+    """★ 提示里给的例子必须**在这份数据上真能用**,否则就是第四次同形状的错。
+
+    第一版是往被截断的列名后面无脑拼 `.name`:5 条会给提示的命令里 4 条照抄就报
+    "no such field(s)" —— `retire_exclusions` 是 list(点路径进不去)、`ai_review` 是 dict
+    但没有 name 键。提示让人去敲一个敲不通的东西,而且这次是我自己新种的。
+
+    这条用例不是"看提示里有没有 --fields",是把提示里的路径抠出来喂给 `_dig`
+    (`--fields` 判定用的就是它),取不到 _MISSING 才算过。
+    """
+    import io
+    import re
+    from unittest import mock
+
+    rows = [{"kind": "replication",
+             "to": {"ref": 2, "name": "sby", "engine": "postgres", "is_rac": True,
+                    "role_detail": "mgr_primary", "cluster_id": 7, "port": 5432},
+             # ★ 这一格必须**确实**超过 _CELL_MAX,否则它不被截断、也就不该被点名 ——
+             # 第一版夹具序列化后是 58 字符,险险没到,用例红了而代码是对的。
+             "exclusions": [{"reason": "cpu-peak-blocks-downsize-%d" % i} for i in range(4)]}]
+    assert len(json.dumps(rows[0]["exclusions"])) > client_module._CELL_MAX
+    err = io.StringIO()
+    with mock.patch.object(client_module.sys, "stdout", io.StringIO()), \
+            mock.patch.object(client_module.sys, "stderr", err):
+        client_module._print_table({"items": rows})
+    note = err.getvalue()
+
+    assert "exclusions" in note, "数组列也被截断了却没点名"
+    for path in re.findall(r"--fields ([\w.,]+)", note):
+        for field in path.split(","):
+            assert client_module._dig(rows[0], field) is not client_module._MISSING, \
+                "提示给的 %r 在这份数据上取不到 —— 照抄就是一条 no such field(s)" % field
+            assert not field.startswith("exclusions."), \
+                "给了一条钻数组的路径,--fields 钻不进去"
+
+
+def test_the_hint_gives_no_example_rather_than_a_fake_one():
+    """取不到能用的例子时**不给例子** —— 宁可少一句,不要给一条假的。"""
+    import io
+    from unittest import mock
+
+    # 唯一的嵌套列是数组,点路径无从下手
+    rows = [{"kind": "x", "blockers": [{"why": "a" * 80}]}]
+    err = io.StringIO()
+    with mock.patch.object(client_module.sys, "stdout", io.StringIO()), \
+            mock.patch.object(client_module.sys, "stderr", err):
+        client_module._print_table({"items": rows})
+    note = err.getvalue()
+    assert "blockers" in note
+    assert "--fields blockers" not in note, "给了一条钻不进去的点路径"
+    assert "csv" in note, "没给例子就得指出还有哪条路"
+
+
+def test_outbound_redaction_covers_username_and_says_it_did():
+    """SKILL.md 的 Safety Rules 说不得输出用户名,而此前**没有任何东西在执行它**。
+
+    生产实测:`instance --instance-id 19` 吐 `instance.username = dbai_mon`,
+    admin 与 ai-client 两种角色都吐。全量扫 30 条命令还发现 `elk-status` 的
+    `auth.username` —— 同伴只扫了 10 条,所以按端点逐个核查这条路本身就是漏的。
+    """
+    import io
+    from unittest import mock
+
+    payload = {"instance": {"id": 19, "name": "pg-1", "username": "dbai_mon",
+                            "password": None},
+               "hosts": [{"dsn": "postgres://a:b@h/db"}]}
+    err = io.StringIO()
+    with mock.patch.object(client_module.sys, "stderr", err):
+        out = client_module._redact_outbound(payload)
+
+    assert out["instance"]["username"] == "<redacted-by-dba-skill>"
+    assert out["hosts"][0]["dsn"] == "<redacted-by-dba-skill>"
+    assert out["instance"]["name"] == "pg-1", "把不敏感的字段一起遮了"
+    # ★ None 保留:"没配监控账号"和"配了但不给你看"是两件事,一律换标记会把前者说成后者。
+    assert out["instance"]["password"] is None
+    # ★ 换值不删键:删了等于说"平台没给这个字段",那是假话。
+    assert "username" in out["instance"]
+    assert "instance.username" in err.getvalue(), "悄悄改掉平台的答案比不改更糟"
+
+
+def test_redaction_does_not_eat_the_field_that_says_which_key_is_in_use():
+    """★ 这条守的是**误伤**那一侧,它是我实际犯下的。
+
+    `credentials.per_key_source` 以**变量名**为键,值是"这把 key 从哪儿读到的"
+    (`process environment` 或某个 .env 路径)。按键名遮就把它一起遮了 ——
+    而那恰恰是排查「到底哪把 key 在生效」唯一有用的字段(上次「陈旧已吊销 key 污染
+    每个 shell」就是靠它定位到 skill-env.zsh 盖掉了父进程正确的那把)。
+    遮蔽规则**过宽和过窄一样是缺陷**,只是过宽的那种更难被发现:输出照样有,只是没用了。
+    """
+    from unittest import mock
+
+    payload = {"credentials": {"credential_source": "/Users/admin/project/.env",
+                               "per_key_source": {"PROJECT_API_KEY": "process environment"}}}
+    # 不 patch stderr:这份载荷不该有任何一处被遮,所以也不该有任何提示写出来。
+    with mock.patch.dict(client_module.os.environ, {"PROJECT_API_KEY": "sk-live-xyz"}):
+        out = client_module._redact_outbound(payload)
+    assert out["credentials"]["per_key_source"]["PROJECT_API_KEY"] == "process environment"
+    assert out["credentials"]["credential_source"] == "/Users/admin/project/.env"
+
+
+def test_redaction_catches_the_key_itself_under_an_innocent_field_name():
+    """兜底:值逐字节等于当前这把 key 就遮,**不看字段叫什么**。
+
+    按名字遮永远只能拦住起对了名字的那些;平台哪天把 key 回显在一个叫 `note` 的字段里,
+    键名规则一点反应都不会有。这一条是那类的唯一防线,连豁免名单也压不过它。
+    """
+    import io
+    from unittest import mock
+
+    payload = {"note": "used key sk-live-xyz to authenticate",
+               "credentials": {"per_key_source": {"PROJECT_API_KEY": "sk-live-xyz"}}}
+    with mock.patch.dict(client_module.os.environ, {"PROJECT_API_KEY": "sk-live-xyz"}), \
+            mock.patch.object(client_module.sys, "stderr", io.StringIO()):
+        out = client_module._redact_outbound(payload)
+    assert out["note"] == "<redacted-by-dba-skill>"
+    assert out["credentials"]["per_key_source"]["PROJECT_API_KEY"] == "<redacted-by-dba-skill>", \
+        "豁免名单压过了兜底规则 —— 真 key 落进豁免的子树就出去了"
