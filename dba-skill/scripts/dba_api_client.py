@@ -481,6 +481,30 @@ def _counts_only(payload: Any) -> Any:
     return out
 
 
+def _lists_present(payload: Any) -> list[str]:
+    """这个响应里**实际**存在的列表键(顶层,含一层嵌套)。
+
+    没有它,拒绝信息只能说"Collections arrive under: items, rows, …" —— 那是一份**别处**的
+    名单,对着一个有三个列表(months / years / year_on_year)的响应说"this response is a
+    single object",读起来像"这儿没东西可分组",而真相是"有三个,但一个都不在识别名单里"。
+    """
+    found: list[str] = []
+    if isinstance(payload, dict):
+        for k, v in payload.items():
+            if isinstance(v, list) and v:
+                found.append(k)
+            elif isinstance(v, dict):
+                found.extend("%s.%s" % (k, k2) for k2, v2 in v.items()
+                             if isinstance(v2, list) and v2)
+    return found
+
+
+def _not_a_collection(flag: str) -> str:
+    """拒绝一个需要集合的旗标时该说的话。"""
+    return ("%s needs a collection; this response is a single object. "
+            "Collections arrive under: %s." % (flag, ", ".join(COLLECTION_KEYS)))
+
+
 def _summary_only(payload: Any) -> Any:
     """Every list, at any depth, replaced by its length.
 
@@ -878,9 +902,12 @@ def _sort_rows(payload: Any, sort_by: str | None, descending: bool) -> Any:
         # Same treatment --format csv already gives this case. Returning the payload untouched
         # meant --sort-by on a single object exited 0 with byte-identical output and an empty
         # stderr: the flag did nothing and said nothing.
+        _lists = _lists_present(payload)
         _fail("not_a_collection",
-              f"--sort-by needs a collection; this response is a single object. "
-              f"Collections arrive under: {', '.join(COLLECTION_KEYS)}.", exit_code=2)
+              _not_a_collection("--sort-by")
+              + (" This response does carry list(s) under %s — none is the response's"
+                 " collection, so there is no single one to use; project with --fields,"
+                 " or read it as JSON." % ", ".join(_lists) if _lists else ""), exit_code=2)
     missing = object()
 
     def key(row: Any):
@@ -917,9 +944,12 @@ def _group_rows(payload: Any, group_by: str) -> Any:
     """
     items, _meta = _envelope(payload)
     if items is None:
+        _lists = _lists_present(payload)
         _fail("not_a_collection",
-              f"--group-by needs a collection; this response is a single object. "
-              f"Collections arrive under: {', '.join(COLLECTION_KEYS)}.", exit_code=2)
+              _not_a_collection("--group-by")
+              + (" This response does carry list(s) under %s — none is the response's"
+                 " collection, so there is no single one to use; project with --fields,"
+                 " or read it as JSON." % ", ".join(_lists) if _lists else ""), exit_code=2)
     counts: dict[str, int] = {}
     for row in items:
         value = _dig(row, group_by) if isinstance(row, dict) else _MISSING
@@ -2017,16 +2047,49 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     """
     if not isinstance(years, list):
         return None
-    covered: dict[str, int] = {}
-    if isinstance(months, list):
+    # 每年出现过哪几个**月份号**,而不只是数量 —— 数量分不出「8-12 连续」和「8,9,11,12 有洞」,
+    # 而后者才是真正的账单缺口。
+    seen: dict[str, set[int]] = {}
+    have_months = isinstance(months, list) and bool(months)
+    if have_months:
         for m in months:
             if isinstance(m, dict):
                 cycle = str(m.get("cycle") or "")
-                if len(cycle) >= 4:
-                    covered[cycle[:4]] = covered.get(cycle[:4], 0) + 1
-    known_years = [str(r.get("year")) for r in years if isinstance(r, dict)]
-    first_year = known_years[0] if known_years else None
-    last_year = known_years[-1] if known_years else None
+                if len(cycle) >= 7 and cycle[4] == "-" and cycle[5:7].isdigit():
+                    seen.setdefault(cycle[:4], set()).add(int(cycle[5:7]))
+
+    def _coverage(year: str) -> tuple[int, str | None]:
+        """(月数, partial 的原因)。原因为 None 表示这一年是完整的。
+
+        ★ ``seen.get(year, set())`` 取的是**空集**而不是 None:years 里有某年、months 里
+        一个月都没有 —— 那是最极端的账单缺口,而此前它是唯一连 partial 都不标的一种
+        (`covered.get(year)` 返回 None 被 `is not None` 挡在门外),读起来跟"完整"一模一样。
+        缺口最大的那种反而看不见,正是这个特性要防的东西。
+        """
+        got = seen.get(year, set())
+        n = len(got)
+        if n >= 12:
+            return n, None
+        if not got:
+            return 0, "missing_months"          # 整年缺失
+        if max(got) - min(got) + 1 != n:
+            return n, "missing_months"          # 中间有洞,与是不是首/末年无关
+        if year == current_year and min(got) == 1:
+            return n, "year_in_progress"        # 从 1 月起、今年还没过完 —— 会自己补齐
+        if year == earliest and max(got) == 12:
+            return n, "series_start"            # 数据从年中开始、一直到年末 —— 永不补齐
+        return n, "missing_months"              # 连续但两头都解释不了 = 缺口
+    # ★ 按年份**排序**再算,不依赖服务端的返回顺序。位置式的 [0]/[-1] 在倒序返回时会把
+    # series_start 和 year_in_progress 直接对调 —— 两个都错、方向相反、都是误导;而 prev_*
+    # 的累加同样依赖顺序,倒序会让整个同比失真。对客户端不控制的数据做无防御的顺序假设,
+    # 是这一整类缺陷的共同根子。
+    years = sorted(
+        [r for r in years if isinstance(r, dict)],
+        key=lambda r: str(r.get("year") or ""),
+    )
+    known_years = [str(r.get("year")) for r in years]
+    earliest = min(known_years) if known_years else None
+    current_year = str(datetime.now().year)
 
     def _pct(cur: Any, prev: Any) -> tuple[Any, Any]:
         if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)):
@@ -2044,18 +2107,19 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
         net = (paid + coupon) if isinstance(paid, (int, float)) and isinstance(coupon, (int, float)) else paid
         entry = {"year": row.get("year"), "gross": gross, "paid": paid, "coupon": coupon,
                  "net_consumption": round(net, 2) if isinstance(net, (int, float)) else None}
-        n = covered.get(year)
-        if n is not None:
+        if have_months:
+            n, reason = _coverage(year)
             entry["months_covered"] = n
-            if n < 12:
+            if reason:
                 entry["partial"] = True
-                # ★ 三种 <12 个月,处置完全不同 —— 合成一个 partial 会把第三种(真缺口)
-                #   伪装成前两种(正常边界)。
-                entry["partial_reason"] = (
-                    "series_start" if year == first_year        # 数据起点,永远不会补齐
-                    else "year_in_progress" if year == last_year  # 今年还没过完,会自己补齐
-                    else "missing_months"                        # ★ 中间年份缺月 = 账单数据缺口,要查
-                )
+                entry["partial_reason"] = reason
+        else:
+            # 没有月度序列就**无法**判断完整性。此前这种情况下整个 partial 机制静默消失,
+            # 每一年都读起来像完整的 —— "查不了"和"没问题"必须是两种可见的答案。
+            entry["coverage_unknown"] = True
+            entry["coverage_unknown_reason"] = (
+                "响应里没有 months 序列,无法判断该年是否满 12 个月;partial 未作判定"
+            )
         entry["delta"], entry["pct"] = _pct(net, prev_net)
         entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
         entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
@@ -2662,11 +2726,27 @@ def main(argv: list[str] | None = None) -> int:
     if fmt == "csv":
         rendered = _to_csv(payload)
         if rendered is None:
-            _fail("not_tabular", "--format csv needs a collection; this response is a single object")
+            lists = _lists_present(payload)
+            # exit_code 与 table/sort-by/group-by 一致:同一类拒绝给出不同退出码,
+            # 是给调用方脚本埋的小陷阱。
+            _fail("not_tabular", "--format csv needs a collection; this response is a single "
+                  "object" + (" (it carries list(s) under %s, but none is the response's "
+                              "collection)" % ", ".join(lists) if lists else ""), exit_code=2)
         sys.stdout.write(rendered)
         return 0
-    if fmt == "table" and _print_table(payload):
-        return 0
+    if fmt == "table":
+        if _print_table(payload):
+            return 0
+        # ★ 此前这里直接掉进 _print_json:exit 0、吐原始 JSON、stderr 空 —— 旗标什么都没做
+        # 也什么都没说。--format csv 早就是响的,table 却不是;三个收窄旗标里唯一静默失败的
+        # 那个,把"失败是响的"这条纪律在最后一步断掉了。
+        lists = _lists_present(payload)
+        detail = ("this response is a single object; it does carry list(s) under %s, but "
+                  "none of them is the response's collection, so there is no single table to "
+                  "render — pass --fields to project one, or read it as JSON."
+                  % ", ".join(lists)) if lists else \
+                 "this response is a single object with no collection to tabulate."
+        _fail("not_tabular", "--format table needs a collection; " + detail, exit_code=2)
     _print_json(payload)
     return 0
 
