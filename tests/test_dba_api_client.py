@@ -1793,3 +1793,49 @@ class SeriesHintIsConditionalTest(unittest.TestCase):
             out = self._run(message)
             self.assertNotIn("hint", out, message)
             self.assertEqual(out["reason"], message, "平台自己那句话没有原样透出去")
+
+
+class MetricSeriesEmptyKindsTest(unittest.TestCase):
+    """★ 同一个形状的第三次:拼错的指标名和"窗口内无样本"返回完全一样的空。
+
+    前两次是 `alerts --severity nosuch` 和 `capacity-forecast --metric-name`。而这个 helper
+    存在的理由,正是平台那句 "an empty list here would read as 'not collected' or 'flat',
+    which is the opposite of the truth" —— 走 422 的那条路被照顾得很好,走空结果的这条
+    一句话都没有。词表离一次 /metrics/{id}/latest 只有一步。
+    """
+
+    def _run(self, metric, series, latest):
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=75, ip=None, host=None,
+                                  metric_name=metric, hours=24, granularity=None)
+
+        def fake(path, params=None):
+            return latest if path.endswith("/latest") else series
+
+        with mock.patch.object(client_module, "_try_get", side_effect=fake):
+            return client_module.cmd_metric_series(args)
+
+    LATEST = [{"metric_name": "qps"}, {"metric_name": "tps"}]
+
+    def test_a_typo_is_named_as_a_typo(self):
+        out = self._run("zzz_nope", [], self.LATEST)
+        self.assertTrue(out["unavailable"])
+        self.assertIn("不在这台实例的指标词表里", out["reason"])
+        self.assertEqual(out["known_metrics"], ["qps", "tps"], "没把可选值列出来")
+
+    def test_a_real_metric_with_no_samples_says_so_instead(self):
+        """守卫不能把正事也挡了:指标是真的,只是这段时间没数据 —— 那是另一种答案。"""
+        out = self._run("qps", [], self.LATEST)
+        self.assertNotIn("unavailable", out)
+        self.assertIn("这段时间没有数据", out["summary"]["note"])
+
+    def test_the_collection_key_is_items_so_the_generic_flags_work(self):
+        """★ `points` 更贴切,但 _envelope 认不出它 —— --fields / --group-by / --sort-by /
+        --format table 会**全部失效**,而"看趋势"恰恰最需要 --fields collected_at,value。
+        同一个教训我在 topology 的注释里写过,又在这条命令上犯了一遍。"""
+        out = self._run("qps", [{"metric_name": "qps", "value": 1.0, "granularity": "raw",
+                                 "collected_at": "2026-09-08T00:00:00"}], self.LATEST)
+        items, meta = client_module._envelope(out)
+        self.assertIsNotNone(items)
+        self.assertEqual(meta.get("items_key"), "items")

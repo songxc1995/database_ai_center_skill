@@ -1954,7 +1954,12 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
               if isinstance(r, dict) and isinstance(r.get("value"), (int, float))]
     out: dict[str, Any] = {
         "instance_id": instance_id,
-        "points": payload,
+        # ★ 键名用 items。第一版叫 `points`(更贴切),结果 --fields / --group-by / --sort-by /
+        # --format table **四个旗标全部失效** —— 而"看趋势"恰恰最需要
+        # `--fields collected_at,value --format table`。同一个教训我在隔壁的 topology 上写进了
+        # 注释,又在这条命令里犯了一遍:贴切的名字换来一堆不工作的旗标,不划算。
+        "items": payload,
+        "item_kind": "metric_point",
         "summary": {
             "points": len(payload),
             "metrics": names,
@@ -1966,6 +1971,30 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
     if values:
         out["summary"].update({"min": min(values), "max": max(values),
                                "first": values[0], "last": values[-1]})
+    if args.metric_name and not payload:
+        # ★ 同一个形状的第三次(alerts --severity nosuch → capacity-forecast --metric-name →
+        # 这里):拼错的指标名和"指标存在但窗口内无样本"返回**完全一样**的空。
+        # 而这个 helper 存在的理由,正是平台那句 "an empty list here would read as
+        # 'not collected' or 'flat', which is the opposite of the truth" —— threads_running
+        # 走 422 时被照顾得很好,拼错名字走空结果时一句话都没有。
+        # 词表离一次 /metrics/{id}/latest 只有一步,拿来把两种空分开。
+        latest = _try_get(f"/metrics/{instance_id}/latest")
+        known = sorted({r.get("metric_name") for r in latest
+                        if isinstance(r, dict) and r.get("metric_name")}) \
+            if isinstance(latest, list) else []
+        if known and args.metric_name not in known:
+            out["unavailable"] = True
+            out["reason"] = (
+                "'%s' 不在这台实例的指标词表里(它有 %d 个指标)。空结果在这里有两种含义,"
+                "而它们长得一样:名字拼错了,或者这个指标确实在窗口内没有样本 —— 这是前者。"
+                % (args.metric_name, len(known))
+            )
+            out["known_metrics"] = known
+        elif known:
+            out["summary"]["note"] = (
+                "'%s' 在这台的指标词表里,但所选窗口内没有样本 —— 是**这段时间没有数据**,"
+                "不是这个指标没在采。" % args.metric_name
+            )
     if granularities and granularities != ["raw"]:
         out["summary"]["note"] = (
             "窗口超过 24 小时,取的是**汇总**而非原始点(value 是该桶的均值,另有 min/max)。"
