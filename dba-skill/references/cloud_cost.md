@@ -192,9 +192,26 @@ Amounts: `gross` = 原价 (list price, stable trend), `paid` = 应付 = the real
 **already net of contract discount and vouchers**, `coupon` = how much voucher was applied.
 Do not subtract `coupon` from `paid` — that double-counts it.
 
-`--since-cycle` / `--until-cycle` window the monthly series; `--yoy` adds per-year delta and
+`--since-cycle` / `--until-cycle` window the monthly series; `--yoy` adds a per-year delta and
 percentage against the previous year (undefined, reported as `null`, when the prior year is 0
 — a `0%` there would read as "unchanged").
+
+**`--yoy` compares on `gross`, and you must not re-base it on `paid`.** `paid` is net of
+vouchers, so it inverts the trend precisely in the years anyone asks about:
+
+| 年 | gross 同比 | paid 同比 | 真相 |
+|---|---|---|---|
+| 2025 | **+0.5%** | −67.1% | 花得一样多,只是烧掉了 ¥344,374 代金券 |
+| 2026 | **−42.3%** | +41.2% | 确实在降,而 paid 的"暴涨"只是券见底 |
+
+`paid_pct` / `paid_delta` are still reported alongside — cash-out is a real question — but
+they are labelled separately and are never the trend. The response carries this warning in
+`year_on_year_basis`.
+
+**A year in progress is flagged `partial` with its `months_covered`.** 2021 starts in August
+(5 months) and the current year is short by definition; comparing 9 months against 12 is not a
+−25% trend. Coverage is counted from the unwindowed series, so `--since-cycle` narrows the
+monthly rows without turning every year into a fake "partial".
 
 ---
 

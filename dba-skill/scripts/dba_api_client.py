@@ -1970,27 +1970,70 @@ def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
         payload["months_filtered_by"] = {"since_cycle": lo, "until_cycle": hi,
                                          "kept": len(kept), "of": len(months)}
     if args.yoy:
-        payload["year_on_year"] = _year_on_year(payload.get("years"))
+        # `months` still references the **unwindowed** series even after the filter above
+        # replaced payload["months"] — year coverage must not shrink just because the caller
+        # asked for a narrower monthly view.
+        payload["year_on_year"] = _year_on_year(
+            payload.get("years"), months if isinstance(months, list) else None
+        )
+        payload["year_on_year_basis"] = (
+            "pct/delta 按 gross(原价);paid_pct/paid_delta 是现金口径,受代金券扭曲——"
+            "券多的年份看着暴跌、券用尽的年份看着暴涨,不能当趋势读。"
+            "partial=true 的年份未满 12 个月,不可与整年直接比。"
+        )
     return payload
 
 
-def _year_on_year(years: Any) -> Any:
+def _year_on_year(years: Any, months: Any = None) -> Any:
     """Δ vs the previous year, per year. Hand-computing this was the most repeated follow-up
-    to this command."""
+    to this command.
+
+    ``pct`` follows **gross** (原价), not ``paid``. ``paid`` is already net of vouchers, so a
+    year that burns a large coupon balance reads as a collapse in spend and the year the
+    coupons run out reads as a surge. Production: 2025 paid −67.1% against gross +0.5%, and
+    2026 paid +40.9% against gross −42.4% — a yoy on ``paid`` alone points the **opposite
+    way from the truth in both of the most recent years**. ``paid_pct`` is still reported,
+    labelled separately, because cash-out is a real question; it is just not the trend.
+
+    A year still in progress is marked ``partial`` with its ``months_covered``. Comparing 8
+    months against 12 is not a −33% trend, and the caller cannot see the month count from the
+    yearly totals alone. Coverage is counted from the **unwindowed** month series, so
+    ``--since-cycle`` / ``--until-cycle`` narrow the monthly rows without silently turning
+    every year in the window into a fake "partial".
+    """
     if not isinstance(years, list):
         return None
+    covered: dict[str, int] = {}
+    if isinstance(months, list):
+        for m in months:
+            if isinstance(m, dict):
+                cycle = str(m.get("cycle") or "")
+                if len(cycle) >= 4:
+                    covered[cycle[:4]] = covered.get(cycle[:4], 0) + 1
     out = []
-    prev = None
+    prev_gross = prev_paid = None
     for row in years:
         if not isinstance(row, dict):
             continue
-        paid = row.get("paid")
-        entry = {"year": row.get("year"), "paid": paid}
-        if isinstance(paid, (int, float)) and isinstance(prev, (int, float)):
-            entry["delta"] = round(paid - prev, 2)
+        year = row.get("year")
+        gross, paid = row.get("gross"), row.get("paid")
+        entry = {"year": year, "gross": gross, "paid": paid, "coupon": row.get("coupon")}
+        n = covered.get(str(year))
+        if n is not None:
+            entry["months_covered"] = n
+            if n < 12:
+                entry["partial"] = True
+        if isinstance(gross, (int, float)) and isinstance(prev_gross, (int, float)):
+            entry["delta"] = round(gross - prev_gross, 2)
             # 上一年为 0 时同比无定义 —— 报 None 而不是 0%,后者读起来像"没变化"。
-            entry["pct"] = round((paid - prev) / prev * 100, 1) if prev else None
-        prev = paid if isinstance(paid, (int, float)) else prev
+            entry["pct"] = round((gross - prev_gross) / prev_gross * 100, 1) if prev_gross else None
+        if isinstance(paid, (int, float)) and isinstance(prev_paid, (int, float)):
+            entry["paid_delta"] = round(paid - prev_paid, 2)
+            entry["paid_pct"] = round((paid - prev_paid) / prev_paid * 100, 1) if prev_paid else None
+        if isinstance(gross, (int, float)):
+            prev_gross = gross
+        if isinstance(paid, (int, float)):
+            prev_paid = paid
         out.append(entry)
     return out
 
@@ -2470,7 +2513,10 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_cost_history.add_argument("--until-cycle", metavar="YYYY-MM",
                                     help="Keep months at or before this billing cycle.")
     cloud_cost_history.add_argument("--yoy", action="store_true",
-                                    help="Add per-year delta and %% vs the previous year.")
+                                    help="Add per-year delta and %% vs the previous year, on "
+                                         "gross (list price). paid_pct is reported separately: "
+                                         "it is net of vouchers and inverts the real trend in "
+                                         "coupon-heavy years. Partial years are flagged.")
     cloud_cost_history.set_defaults(func=cmd_cloud_cost_history)
 
     backups = sub.add_parser(

@@ -213,7 +213,7 @@ python scripts/dba_api_client.py cloud-savings-realized --pending-only --fields 
 python scripts/dba_api_client.py cloud-cost-history --yoy
 ```
 
-Four traps that produce a wrong answer rather than an obviously missing one:
+Five traps that produce a wrong answer rather than an obviously missing one:
 
 1. **`cost_refreshed_at` — carry it with any cost conclusion.** These figures come from a
    daily refresh, not from your request, and they move between reads. Same discipline as
@@ -228,6 +228,11 @@ Four traps that produce a wrong answer rather than an obviously missing one:
    Aliyun instance is voucher-covered.
 4. **Savings are compute-only.** A class change does not shrink storage, so over-provisioned
    disk is in `storage_summary` and in **no** saving figure. "还能省多少" has two pools.
+5. **Cost trend is `gross`, never `paid`.** `paid` is net of vouchers and inverts the trend in
+   exactly the years anyone asks about — 2025 was gross **+0.5%** but paid **−67.1%** (a
+   ¥344k coupon burn), 2026 gross **−42.3%** but paid **+41.2%** (the coupons running out).
+   `--yoy` compares on `gross` and labels `paid_pct` separately for this reason, and flags a
+   year still in progress as `partial` — 9 months against 12 is not a −25% trend.
 
 `verified_monthly_saving = ¥0` is normal, not a broken pipeline: this fleet is almost all
 包年包月 and a subscription re-prices only at renewal. `verification_basis` says which wait it
