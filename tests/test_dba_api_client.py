@@ -1891,6 +1891,41 @@ class MetricSeriesUnknownVocabularyTest(unittest.TestCase):
         self.assertIn("这段时间没有数据", empty_window["summary"]["note"])
 
 
+def test_topology_does_not_drop_any_platform_field():
+    """★ 断言的是**键集**,不是某一条边有某个键。
+
+    上一版写成"这条边有 resolved_by",于是它依赖"回落被触发"这个前提 —— 回落逻辑一变,
+    用例可能自己失效而没人发现。改成比对键集之后:任意一条边、任意一个节点都能当样本,
+    下一个被漏掉的字段也会被抓住,而不是只守住我当时想到的那一个。
+
+    这个缺口不是"将来会漏",是**现在就在漏**:第一版只透出 12 个节点键里的 5 个,
+    丢掉的里面有 role_detail(143 个 primary 被它拆成 primary/source/mgr_primary ——
+    MGR 主库和普通异步主库的运维动作不一样)和 is_rac(227 个节点里 14 个为真)。
+    """
+    from unittest import mock
+
+    node = {"id": 2, "name": "sby", "external": False, "host": "10.0.0.2", "port": 5432,
+            "engine": "postgres", "instance_role": "primary", "role_detail": "mgr_primary",
+            "role_conflict": False, "node_count": 2, "is_rac": True, "cluster_id": 7}
+    payload = {"nodes": [node],
+               "edges": [{"from": 1, "to": 2, "kind": "replication",
+                          "sync_state": "async", "resolved_by": "address_fallback"}]}
+    args = argparse.Namespace(instance_id=None, ip=None, host=None, external_only=False)
+    with mock.patch.object(client_module, "_request", return_value=payload):
+        out = client_module.cmd_topology(args)
+
+    edge = out["items"][0]
+    dropped_edge = set(payload["edges"][0]) - set(edge)
+    assert not dropped_edge, "边上的字段被 helper 丢了:%s" % dropped_edge
+
+    # 节点侧:ref 取代了 id,其余都该在
+    carried = set(edge["to"])
+    dropped_node = set(node) - carried - {"id"}
+    assert not dropped_node, "节点上的字段被 helper 丢了:%s" % dropped_node
+    assert edge["to"]["role_detail"] == "mgr_primary", "role_detail 被抹平了"
+    assert edge["to"]["is_rac"] is True
+
+
 def test_topology_passes_through_the_inference_marker():
     """★ 平台打 `resolved_by` 的全部理由是让人看得见"这条边是猜的"。
     helper 在中间丢掉它,等于那个标记白加了 —— 第一版正是这么丢的:平台标 2 条,这儿显示 0 条。"""
@@ -1903,3 +1938,51 @@ def test_topology_passes_through_the_inference_marker():
     with mock.patch.object(client_module, "_request", return_value=payload):
         out = client_module.cmd_topology(args)
     assert out["items"][0]["resolved_by"] == "address_fallback"
+
+
+class SeriesNoteExplainsTheRealCauseTest(unittest.TestCase):
+    """★ "取到的是汇总"有**两个**原因,而第一版的 note 只写了其中一个。
+
+        --hours 48                       → auto 切的       "窗口超过 24 小时"  ✓
+        --granularity minute --hours 12  → 调用方指定的     同一句话            ✗ 假的
+
+    第二种情况下窗口只有 12 小时,而且云指标在这个窗口里**恰恰查得到**(raw 还在),
+    后半句也跟着错。**数据是对的,解释是错的,而错误的解释会让人去缩窗口 —— 一个不是原因的东西。**
+
+    和 422 的 hint 那次是同一个形状("错的建议比没有建议更贵"),只是载体换成了 note。
+    """
+
+    def _note(self, granularity, hours):
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=19, ip=None, host=None,
+                                  metric_name="fra_used_pct", hours=hours,
+                                  granularity=granularity)
+        rows = [{"metric_name": "fra_used_pct", "value": 1.0, "granularity": "minute",
+                 "collected_at": "2026-09-08T00:00:00"}]
+        with mock.patch.object(client_module, "_try_get", return_value=rows):
+            return client_module.cmd_metric_series(args)["summary"].get("note") or ""
+
+    def test_an_explicit_granularity_is_named_as_the_cause(self):
+        note = self._note("minute", 12)
+        self.assertIn("--granularity minute", note)
+        self.assertNotIn("窗口超过 24 小时", note, "12 小时的窗口被说成超过 24 小时")
+
+    def test_auto_switching_on_a_wide_window_still_says_so(self):
+        """守卫不能把正事挡了:真的是窗口大切换的时候,那句话仍然要说。"""
+        note = self._note(None, 48)
+        self.assertIn("窗口超过 24 小时", note)
+
+    def test_a_deprecated_metric_says_so_before_anyone_trends_it(self):
+        """基于一个已废弃的指标做趋势判断,值得先知道这件事 ——
+        "数据齐全"和"数据齐全但这个指标已经不该用了"读起来一样。"""
+        from unittest import mock
+
+        args = argparse.Namespace(instance_id=19, ip=None, host=None, metric_name="old_metric",
+                                  hours=24, granularity=None)
+        rows = [{"metric_name": "old_metric", "value": 1.0, "granularity": "raw",
+                 "collected_at": "2026-09-08T00:00:00", "deprecated": True}]
+        with mock.patch.object(client_module, "_try_get", return_value=rows):
+            summary = client_module.cmd_metric_series(args)["summary"]
+        self.assertTrue(summary["deprecated"])
+        self.assertIn("还是不是你要看的那个指标", summary["deprecated_note"])

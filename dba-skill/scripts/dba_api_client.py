@@ -1853,9 +1853,18 @@ def cmd_topology(args: argparse.Namespace) -> Any:
             return {"ref": ref, "external": True, "endpoint": ref[4:], "name": None,
                     "note": "未纳管主机——平台只知道地址,没有它的指标/备份/负责人"}
         node = nodes.get(ref) or {}
-        return {"ref": ref, "external": bool(node.get("external")), "name": node.get("name"),
-                "engine": node.get("engine"), "instance_role": node.get("instance_role"),
-                "cluster_id": node.get("cluster_id")}
+        # ★ 透出节点上**所有有判断价值**的字段,别挑五个。第一版只留了 5/12,丢掉的里面有:
+        #   role_detail  —— 143 个 instance_role="primary" 被它拆成 primary 44 / source 98 /
+        #                   mgr_primary 1。**MGR 主库和普通异步主库的运维动作不一样**,
+        #                   只给 instance_role 等于把这个区分抹平。
+        #   is_rac / node_count —— 227 个节点里 14 个 is_rac=true,在实实在在地丢数据。
+        #   role_conflict —— 今天全 false,但"两个节点都自称主"正是拓扑工具最不该静默丢的那个。
+        # host/port/id 与 ref 冗余,仍然带上:让下游能不回头查就做连接。
+        out = {"ref": ref, "external": bool(node.get("external"))}
+        for key in ("name", "engine", "instance_role", "role_detail", "role_conflict",
+                    "node_count", "is_rac", "cluster_id", "host", "port"):
+            out[key] = node.get(key)
+        return out
 
     focus = _resolve_instance_id(args)
     rows = []
@@ -1975,6 +1984,13 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
     if values:
         out["summary"].update({"min": min(values), "max": max(values),
                                "first": values[0], "last": values[-1]})
+    # 平台在点上标了 deprecated,而基于一个已废弃的指标做趋势判断,值得先知道这件事。
+    # 不提的话,"数据齐全"和"数据齐全但这个指标已经不该用了"读起来一样。
+    if any(r.get("deprecated") for r in payload if isinstance(r, dict)):
+        out["summary"]["deprecated"] = True
+        out["summary"]["deprecated_note"] = (
+            "平台把这个指标标记为 deprecated —— 趋势本身是真的,但先确认它还是不是你要看的那个指标。"
+        )
     if args.metric_name and not payload:
         # ★ 同一个形状的第三次(alerts --severity nosuch → capacity-forecast --metric-name →
         # 这里):拼错的指标名和"指标存在但窗口内无样本"返回**完全一样**的空。
@@ -2021,10 +2037,26 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
                 "不是这个指标没在采。" % args.metric_name
             )
     if granularities and granularities != ["raw"]:
-        out["summary"]["note"] = (
-            "窗口超过 24 小时,取的是**汇总**而非原始点(value 是该桶的均值,另有 min/max)。"
-            "云采集的指标没有汇总,所以它们在这个窗口里查不到——平台会用 422 说明,不是空数组。"
-        )
+        # ★ "取到的是汇总"有**两个**原因,而第一版只写了其中一个:
+        #   (a) 窗口超过 24 小时 —— auto 自己切的
+        #   (b) 调用方自己指定了 --granularity —— 窗口可能只有 12 小时
+        # 对 (b) 说"窗口超过 24 小时"是**假话**,而且后半句也跟着错:那种情况下云指标在这个
+        # 窗口里恰恰是**查得到**的(raw 还在)。数据是对的,解释是错的,而错误的解释会让人
+        # 去缩窗口 —— 一个不是原因的东西。
+        # 这和我上一轮在 422 的 hint 上修的是同一个形状("错的建议比没有建议更贵"),
+        # 只是载体换成了 note。
+        if args.granularity and args.granularity != "auto":
+            out["summary"]["note"] = (
+                "取的是**汇总**而非原始点,因为你指定了 --granularity %s(不是因为窗口大小)。"
+                "value 是该桶的均值,另有 min/max。想要原始点用 --granularity raw 或 auto"
+                "(auto 在 ≤24 小时内给 raw)。" % args.granularity
+            )
+        else:
+            out["summary"]["note"] = (
+                "窗口超过 24 小时,auto 因此取了**汇总**而非原始点(value 是该桶的均值,"
+                "另有 min/max)。云采集的指标没有汇总,所以它们在这个窗口里查不到 —— "
+                "平台会用 422 说明,不是空数组。"
+            )
     return out
 
 
