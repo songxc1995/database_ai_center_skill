@@ -36,6 +36,12 @@ event.
 **`determination` is historical.** `verified` means a backup once succeeded — for "is it fine
 now" read `recovery.latest_restore_point_at` and `sync_stale` / `sync_age_seconds`.
 
+**When anything is not working, run `whoami` first.** It answers four questions in one call
+that are otherwise four separate guesses: who the platform thinks you are (role), when the key
+expires, what rate limit you are against, and whether the platform itself is healthy. A bare
+`401`/`403`/`429` cannot tell you which of those it is, and the wrong guess sends you to fix
+the wrong thing.
+
 **`supported` in `probe-catalog` is not `available`.** Read `available` + `note` from the run.
 
 **`--fields a,b,c` and `--format table`** cut a several-hundred-KB dump to the columns asked
@@ -118,7 +124,7 @@ Prefer the bundled helper when local script execution is available:
 python scripts/dba_api_client.py inventory-summary
 python scripts/dba_api_client.py classification --type oracle
 python scripts/dba_api_client.py directory-options --type contact --limit 20
-python scripts/dba_api_client.py alerts-list --status active --page-size 20
+python scripts/dba_api_client.py alerts --status active
 python scripts/dba_api_client.py databases-search --business Payments --contact Alice
 python scripts/dba_api_client.py context --alert-id 5
 python scripts/dba_api_client.py diagnostics-catalog --instance-id 12
@@ -158,12 +164,12 @@ For asset, ownership, and governance questions:
 For live list questions:
 
 1. Use `directory-options --type contact` for “数据库联系人有哪些”, “联系人列表”, or “有哪些联系人”.
-2. Use `alerts-list --status active` for “现在有哪些告警”, “当前告警”, “active alerts”, or “告警列表”.
+2. Use `alerts --status active` for “现在有哪些告警”, “当前告警”, “active alerts”, or “告警列表”. (`alerts-list` is the older paginated UI endpoint and returns the raw evidence blob including internal `_dac_*` fields — reach for it only when you need a field `alerts` does not lift out.)
 3. Do not answer live list questions from documentation, sample data, repository search, or direct local metadata database queries.
 
 For alert and diagnosis questions:
 
-1. Use `alerts-list` first when the user asks which alerts currently exist.
+1. Use `alerts` first when the user asks which alerts currently exist.
 2. Use `resolve` when the user gives host, IP, database name, application, contact, or alert id.
 3. Use `alert-evidence` for alert-specific evidence.
 4. Use `context` before producing DBA analysis.
@@ -182,7 +188,54 @@ For TiDB cluster-level signals not visible to SQL probes (Database AI Center `v2
 
 For database logs (Database AI Center `v2.24+`), use `elk-status` (are the ELK indices up?), `elk-coverage` (which instances are / are not shipping logs), and `elk-search --host-ip <ip> --levels ERROR,FATAL --start <iso> --end <iso>` to pull actual DB error-log lines as evidence. Search by the instance's host IP; narrow with `--levels` and a time window around the incident.
 
-For cloud RDS (Database AI Center `v2.74+`), use `cloud-rightsizing` (per-instance peaks, downsize candidates, monthly cost + estimated saving; `--vendor aliyun|huawei`, `--window-days`) and `cloud-cost-history` (billing by month/year). These are cost/capacity facts — advisory, never an instruction to resize.
+### Cloud RDS cost
+
+Three commands, three different questions — answering one with another is the standard way to
+be confidently wrong here:
+
+| Question | Command |
+|---|---|
+| 还能省多少(候选) | `cloud-rightsizing` |
+| 真省了多少(已执行) | `cloud-savings-realized` |
+| 历史花了多少 | `cloud-cost-history` — **仅阿里**,华为无 5 年账单接口 |
+
+These are cost facts — advisory, never an instruction to resize.
+
+**`cloud-rightsizing` is ~300 KB. Start with `--summary-only` (~2 KB), then narrow.**
+`--count-only` is not enough here: it drops only top-level lists and this response embeds its
+own (`coupon_funded.instances`, `storage_summary.over_provisioned`), so it still returns ~10 KB.
+
+```
+python scripts/dba_api_client.py cloud-rightsizing --summary-only
+python scripts/dba_api_client.py cloud-rightsizing --group-by shortlist_state
+python scripts/dba_api_client.py cloud-rightsizing --fields name,monthly_saving,shortlist_state --sort-by monthly_saving --desc --format table
+python scripts/dba_api_client.py cloud-savings-realized --pending-only --fields instance_name,status,monthly_saving,verification_basis,verification_expected_at --format table
+python scripts/dba_api_client.py cloud-cost-history --yoy
+```
+
+Four traps that produce a wrong answer rather than an obviously missing one:
+
+1. **`cost_refreshed_at` — carry it with any cost conclusion.** These figures come from a
+   daily refresh, not from your request, and they move between reads. Same discipline as
+   `generated_at` on a verdict. Check `cost_refresh_throttled` too: a throttled row kept its
+   previous values and is **not** a row with no downsize target.
+2. **Two "actionable" numbers.** `shortlist_states.actionable` = cleared every gate;
+   `actionable_count` = cleared every gate **and lands this quarter**. Both are correct; the
+   wrong one silently changes your claim.
+3. **`real_monthly_bill = ¥0` has three meanings** — voucher-funded, not billed this cycle, or
+   a negative refund cycle. Read `bill_is_run_rate` and `coupon_amount` rather than the zero.
+   Per-instance voucher data is **Huawei only**, so an empty `coupon_funded` does not mean no
+   Aliyun instance is voucher-covered.
+4. **Savings are compute-only.** A class change does not shrink storage, so over-provisioned
+   disk is in `storage_summary` and in **no** saving figure. "还能省多少" has two pools.
+
+`verified_monthly_saving = ¥0` is normal, not a broken pipeline: this fleet is almost all
+包年包月 and a subscription re-prices only at renewal. `verification_basis` says which wait it
+is — and `unverifiable_no_baseline` means it will **never** verify by itself.
+
+**Full vocabulary — the four saving figures and how they nest, every `shortlist_state`, the
+month-end evidence rule, the two-stage verification table — is in
+`references/cloud_cost.md`. Read it before building a cost answer.**
 
 For "does this instance actually have a backup?" (Database AI Center `v2.98+`), use `backups --instance-id <id>`. Read the `determination` field, not the raw status — expdp dumps are invisible to RMAN so the status alone reads as a false "no backup":
 - `verified` — evidence of a successful backup (rman: RMAN record; expdp/external: a reported or offsite record).
@@ -225,12 +278,20 @@ Use `ai-endpoints` + `get` for the long tail, not as a replacement for the core 
 ## Endpoint Map
 See `references/dba_api.md` for the semantics and pitfalls that a schema cannot express (metric-name spellings, two-track backups, data-quality flags, how gaps are reported, why an instance may not be alerting).
 
+See `references/cloud_cost.md` before answering anything about cloud cost or savings: which of
+the four saving figures answers the question asked, why two fields are both called
+"actionable", the three meanings of a ¥0 bill, and why a ¥0 verified saving is usually correct.
+
 **Endpoints are discovered, not listed here.** `ai-endpoints` is derived from the live routes and their role grants, so it cannot drift; this file used to carry a hand-kept list and it drifted anyway — 36 entries against 84 reachable endpoints, missing every one added after platform v3.32. A list that lags is worse than no list, because it reads as complete. Use `ai-endpoints` for the surface and `get <path>` to call anything on it.
 
 What follows is only the **command → endpoint** mapping, which discovery genuinely cannot give you: it says which questions already have a helper carrying typed filters and safer defaults. Anything not here is still reachable with `get`.
 
 | Command | Endpoint |
 | --- | --- |
+| `whoami` | `GET /dba/whoami` — identity, key expiry, rate limits, platform health |
+| `self-check` | `GET /observability/self-check` — cross-subsystem invariants |
+| `instance` | one instance, everything (detail + freshness + backups + databases + alerts) |
+| `onboarding-check` | is a newly onboarded instance actually wired up |
 | `resolve` | `GET /dba/resolve` |
 | `context` | `GET /dba/context` |
 | `alerts` | `GET /dba/alerts` |
@@ -253,7 +314,9 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
 | `kb-search` / `kb-incidents` / `kb-doc-search` | `GET /knowledge/...` |
 | `elk-status` / `elk-coverage` / `elk-search` | `GET /elk/...` |
-| `cloud-rightsizing` / `cloud-cost-history` | `GET /cloud-rds/...` |
+| `cloud-rightsizing` | `GET /cloud-rds/rightsizing` — **候选**:还能省多少 |
+| `cloud-savings-realized` | `GET /cloud-rds/downsizing-plans` — **成效**:已执行的省了多少 |
+| `cloud-cost-history` | `GET /cloud-rds/cost-history` — 账单历史(**仅阿里**) |
 | `ai-endpoints` | `GET /ai-endpoints` (the catalogue itself) |
 | `get <path>` | anything else in the catalogue |
 
@@ -366,34 +429,27 @@ installer provides `python.exe` and `py.exe`, not `python3`. On a POSIX box wher
 missing or points at Python 2, use `python3`. The examples name the case that breaks silently:
 a model copies the example, not the caveat next to it.
 
-### "Does this instance have a backup?" has three vocabularies
+### Backups and verdicts: two rules that must not leave this file
 
-Three endpoints answer versions of that question in three different shapes, and reading only
-one of them is how a confident wrong answer gets produced.
+**One instance → `determination`; the fleet → `verdict`; never `has_backup_run_records`.**
+Three endpoints answer "does this instance have a backup?" in three different shapes, and
+`has_backup_run_records` is false for an instance backed up nightly by expdp — RMAN cannot see
+a dump. The full three-way table is in `references/dba_api.md`.
 
-| Field | Endpoint | Shape | What it actually means |
-|---|---|---|---|
-| `has_backup_run_records` | `classification` | bool | Only: does a backup **run record** exist. RMAN cannot see an expdp dump, so an instance declared `expdp` is `false` here while being backed up nightly. Never read this as "has a backup". |
-| `determination` | `backups` | 4 states | The per-instance evidence verdict: `verified` / `declared_no_evidence` / `not_tracked` / `unknown`. This is the one that answers the question for a single instance. |
-| `verdict` | `backups-coverage` | 8 states | The fleet-level judgement, which also folds in the offsite track and cluster coverage. `underlying_verdict` shows what the evidence said before suppression. |
-
-Rule of thumb: **one instance → `determination`; the fleet → `verdict`; never `has_backup_run_records`.**
-
-### `verdict` is a computed judgement, and it changes
-
-The same query five hours apart returned different verdicts for instances 97, 59 and 69 — the
-data had not changed, the judging logic had. That is normal (each change fixed a real
-misreading), but it means a verdict is only true as of the `generated_at` in the same response.
-
-Carry `generated_at` with any conclusion built on one, and re-run rather than reusing an
-earlier answer. The same applies to `counts`: they describe the whole matched set, while
-`items` is one page — check `truncated` before treating a list as complete.
+**A `verdict` is true only as of the `generated_at` in the same response.** The same query five
+hours apart returned different verdicts for three instances: the data had not changed, the
+judging logic had. Carry `generated_at` with any conclusion built on one, and re-run rather
+than reusing an earlier answer. The same applies to `counts` vs `items` — check `truncated`
+before treating a list as complete. (Cloud cost has the same discipline under a different
+field: `cost_refreshed_at`.)
 
 ### Is the platform itself telling the truth?
 
 Before reporting that something is absent — no alerts, no backups, no metrics — consider that
-the platform may simply not know. `get /observability/self-check` runs the cross-subsystem
-invariants (37 of them) and returns `checks_violating` plus the offending rows; `get
+the platform may simply not know. The `self-check` command runs the cross-subsystem invariants
+and returns `checks_violating` plus the offending rows — read `checks_total` from the response
+rather than trusting a number written here, because the count grows with the platform (it was
+36, then 37, and is 39 as of v3.62.0); `get
 /observability/main-chain` shows whether collection→alerting→AI is actually flowing, and `get
 /observability/version` says which release is answering you. A finding of "nothing found" is
 worth a lot less when these disagree.

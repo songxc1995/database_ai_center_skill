@@ -272,6 +272,7 @@ _LAST_FAILURE: str | None = None
 # so hitting it looked like "that is all the data there is".
 _MAX_PAGES = 50
 _COUNT_ONLY = False
+_SUMMARY_ONLY = False
 
 # Last HTTP status seen, so the /dba prefix retry fires only for a genuine 404. A 401 is not
 # a path problem: retrying it just emits a second identical failure and buries the first.
@@ -353,7 +354,7 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
     """
     if not isinstance(payload, dict):
         return
-    if _COUNT_ONLY:
+    if _COUNT_ONLY or _SUMMARY_ONLY:
         # The caller asked for the counts and is getting them in full. Telling them the rows
         # are incomplete — and to fetch more rows — argues against what they just requested.
         return
@@ -478,6 +479,25 @@ def _counts_only(payload: Any) -> Any:
     out["returned_rows"] = len(items)
     out["rows_omitted_by"] = "--count-only"
     return out
+
+
+def _summary_only(payload: Any) -> Any:
+    """Every list, at any depth, replaced by its length.
+
+    ``--count-only`` drops only the *top-level* collection, which was enough when an envelope
+    was `{items: [...], total: N}`. It stopped being enough once headline objects started
+    carrying their own lists: `cloud-rightsizing --count-only` still returns ~10 KB because
+    `coupon_funded.instances` (37) and `storage_summary.over_provisioned` (20) are nested
+    inside dicts and never matched the top-level filter. Same response under this flag: 2 KB.
+
+    The length is kept rather than the key dropped — "37 instances are coupon-funded" is the
+    part worth having, and a vanished key would read as "there are none".
+    """
+    if isinstance(payload, dict):
+        return {k: _summary_only(v) for k, v in payload.items()}
+    if isinstance(payload, list):
+        return {"count": len(payload), "omitted_by": "--summary-only"}
+    return payload
 
 
 def _project(payload: Any, fields: list[str] | None) -> Any:
@@ -1859,8 +1879,120 @@ def cmd_cloud_rightsizing(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_cloud_savings_realized(args: argparse.Namespace) -> Any:
+    """What was actually DONE about cost, not what could be.
+
+    ``cloud-rightsizing`` answers "how much could we save" (candidates). This answers "how much
+    did we save" (plans acted on) — two different questions that people ask with the same
+    sentence, 降本情况如何. Answering the second with the first over-reports by every candidate
+    nobody ever executed.
+
+    The two-stage split is the whole point and is easy to misread:
+      * ``downsized``  = the class changed. Observable today.
+      * ``verified``   = an invoice came in below the pre-change baseline. Real money.
+    Almost this fleet is 包年包月, and a subscription re-prices **only at renewal** — so a plan
+    sitting at ``downsized`` for months is not stalled, and ``verified_monthly_saving = ¥0`` is
+    not a broken pipeline. ``verification_note`` says which of those it is; it is lifted to the
+    top here rather than left in the payload, because without it "账单没降" reads as failure.
+    """
+    payload = _request(
+        "GET", "/cloud-rds/downsizing-plans",
+        params={"status": args.status, "sort": args.sort},
+    )
+    if not isinstance(payload, dict):
+        return payload
+    items = payload.get("items")
+    if not isinstance(items, list):
+        return payload
+    if args.pending_only:
+        items = [p for p in items if p.get("status") in ("adopted", "downsized")]
+    if args.drifted_only:
+        items = [p for p in items if p.get("drift_note")]
+    payload = {**payload, "items": items}
+    # A per-status roll-up beside the rows, so the first question ("how many are where")
+    # does not need a hand-written pass over the list.
+    by_status: dict[str, int] = {}
+    for plan in items:
+        key = str(plan.get("status") or "unknown")
+        by_status[key] = by_status.get(key, 0) + 1
+    payload["by_status"] = by_status
+    # Why the verified figure is what it is. A bare ¥0 and a broken verification chain look
+    # identical; these say which one you are looking at.
+    waiting: dict[str, int] = {}
+    for plan in items:
+        if plan.get("status") in ("adopted", "downsized"):
+            basis = str(plan.get("verification_basis") or "unknown")
+            waiting[basis] = waiting.get(basis, 0) + 1
+    if waiting:
+        payload["awaiting_verification_by_basis"] = waiting
+    drifted = [p for p in items if p.get("drift_note")]
+    if drifted:
+        # Drift = the live report has moved away from the snapshot a human approved. Shown,
+        # never auto-applied — but it must not stay buried in a per-row field either.
+        payload["drifted"] = [
+            {"id": p.get("id"), "instance_name": p.get("instance_name"),
+             "status": p.get("status"), "drift_note": p.get("drift_note")}
+            for p in drifted
+        ]
+    return payload
+
+
 def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
-    return _request("GET", "/cloud-rds/cost-history")
+    """Billing history. **Aliyun only** — Huawei has no 5-year overview API, so this is not
+    the fleet's total spend, and reading it as such under-reports by every Huawei instance.
+
+    The endpoint itself takes no parameters (it returns the whole stored series), so the
+    windowing and the year-on-year comparison below are done here on the full payload rather
+    than pushed to the server. That is a deliberate limit, not an oversight: there is no
+    vendor dimension in this data at all, which is why there is no ``--vendor`` flag — one
+    would return Aliyun numbers under a Huawei label.
+    """
+    payload = _request("GET", "/cloud-rds/cost-history")
+    if not isinstance(payload, dict):
+        return payload
+    if "coverage" not in payload:
+        # 老平台(< v3.63.0)不报覆盖范围。这里补一句**已知的限制**,而不是让调用方以为
+        # 这是全舰队支出。刻意不写死 "aliyun_only":平台自己会算的那份才是权威,一旦它开始
+        # 返回 coverage,这段就让位——写死的文案是会过期的,而没人会记得回来改。
+        payload = {**payload, "coverage": {
+            "vendors_included": None,
+            "vendors_missing": None,
+            "note": "平台未返回覆盖范围(旧版本)。已知限制:华为没有 5 年账单总览接口,"
+                    "所以这份历史很可能不含华为支出——按全舰队解读会低估。",
+        }}
+    months = payload.get("months")
+    if isinstance(months, list) and (args.since_cycle or args.until_cycle):
+        lo, hi = args.since_cycle, args.until_cycle
+        kept = [m for m in months
+                if (not lo or str(m.get("cycle") or "") >= lo)
+                and (not hi or str(m.get("cycle") or "") <= hi)]
+        payload["months"] = kept
+        payload["months_filtered_by"] = {"since_cycle": lo, "until_cycle": hi,
+                                         "kept": len(kept), "of": len(months)}
+    if args.yoy:
+        payload["year_on_year"] = _year_on_year(payload.get("years"))
+    return payload
+
+
+def _year_on_year(years: Any) -> Any:
+    """Δ vs the previous year, per year. Hand-computing this was the most repeated follow-up
+    to this command."""
+    if not isinstance(years, list):
+        return None
+    out = []
+    prev = None
+    for row in years:
+        if not isinstance(row, dict):
+            continue
+        paid = row.get("paid")
+        entry = {"year": row.get("year"), "paid": paid}
+        if isinstance(paid, (int, float)) and isinstance(prev, (int, float)):
+            entry["delta"] = round(paid - prev, 2)
+            # 上一年为 0 时同比无定义 —— 报 None 而不是 0%,后者读起来像"没变化"。
+            entry["pct"] = round((paid - prev) / prev * 100, 1) if prev else None
+        prev = paid if isinstance(paid, (int, float)) else prev
+        out.append(entry)
+    return out
 
 
 def cmd_backups(args: argparse.Namespace) -> Any:
@@ -1930,6 +2062,15 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
         "--desc", action="store_true",
         default=(argparse.SUPPRESS if suppress_defaults else False),
         help="Sort descending. Only meaningful with --sort-by.",
+    )
+    parser.add_argument(
+        "--summary-only", action="store_true",
+        default=(argparse.SUPPRESS if suppress_defaults else False),
+        help="Scalars only: every list at ANY depth becomes {count, omitted_by}. "
+             "--count-only drops only TOP-LEVEL lists, so a response whose headline embeds "
+             "its own lists still comes back large — cloud-rightsizing --count-only is still "
+             "~10 KB because coupon_funded.instances and storage_summary.over_provisioned "
+             "live inside dicts. This is the flag for 'just the numbers'.",
     )
     parser.add_argument(
         "--count-only", action="store_true",
@@ -2305,9 +2446,31 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_rightsizing.add_argument("--vendor", choices=["aliyun", "huawei"], help="Restrict to one provider")
     cloud_rightsizing.set_defaults(func=cmd_cloud_rightsizing)
 
-    cloud_cost_history = sub.add_parser(
-        "cloud-cost-history", help="Cloud RDS billing history (gross / paid / coupon by month + year)"
+    cloud_savings = sub.add_parser(
+        "cloud-savings-realized",
+        help="降本成效:已执行的降配/退订计划(不是候选)。二阶段=downsized(规格已变)/verified(账单已降)",
     )
+    cloud_savings.add_argument("--status", choices=["candidate", "adopted", "downsized",
+                                                    "verified", "rejected", "superseded"],
+                               help="Filter by plan status; omit for all.")
+    cloud_savings.add_argument("--pending-only", action="store_true",
+                               help="Only plans done but not yet invoice-verified (adopted/downsized).")
+    cloud_savings.add_argument("--drifted-only", action="store_true",
+                               help="Only plans whose live report has moved away from the approved snapshot.")
+    cloud_savings.add_argument("--sort", default="saving_desc",
+                               help="saving_desc | saving_asc | cost_desc | name | status | updated_desc")
+    cloud_savings.set_defaults(func=cmd_cloud_savings_realized)
+
+    cloud_cost_history = sub.add_parser(
+        "cloud-cost-history",
+        help="Cloud RDS billing history (gross / paid / coupon by month + year). ALIYUN ONLY.",
+    )
+    cloud_cost_history.add_argument("--since-cycle", metavar="YYYY-MM",
+                                    help="Keep months at or after this billing cycle.")
+    cloud_cost_history.add_argument("--until-cycle", metavar="YYYY-MM",
+                                    help="Keep months at or before this billing cycle.")
+    cloud_cost_history.add_argument("--yoy", action="store_true",
+                                    help="Add per-year delta and %% vs the previous year.")
     cloud_cost_history.set_defaults(func=cmd_cloud_cost_history)
 
     backups = sub.add_parser(
@@ -2336,10 +2499,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
-    global _FETCH_ALL, _MAX_PAGES, _COUNT_ONLY
+    global _FETCH_ALL, _MAX_PAGES, _COUNT_ONLY, _SUMMARY_ONLY
     _FETCH_ALL = bool(getattr(args, "all", False))
     _MAX_PAGES = int(getattr(args, "max_pages", None) or _MAX_PAGES)
     _COUNT_ONLY = bool(getattr(args, "count_only", False))
+    _SUMMARY_ONLY = bool(getattr(args, "summary_only", False))
     ids_raw = getattr(args, "instance_ids", None)
     if getattr(args, "_needs_instance", False) and not ids_raw and getattr(args, "instance_id", None) is None:
         # argparse cannot express "exactly one of these two", and making --instance-id required
@@ -2406,7 +2570,9 @@ def main(argv: list[str] | None = None) -> int:
         if saved:
             sys.stderr.write(json.dumps({"snapshot": saved}, ensure_ascii=False) + "\n")
 
-    if _COUNT_ONLY:
+    if getattr(args, "summary_only", False):
+        payload = _summary_only(payload)
+    elif _COUNT_ONLY:
         payload = _counts_only(payload)
     payload = _sort_rows(payload, getattr(args, "sort_by", None), bool(getattr(args, "desc", False)))
     payload = _project(payload, _split_fields(getattr(args, "fields", None)))

@@ -202,6 +202,29 @@ had failed for two days and had never once succeeded.
   those as failures once produced 161 at-risk instances out of 188 and buried the ~10 real
   ones.
 
+## "Does this instance have a backup?" has three vocabularies
+
+Three endpoints answer versions of that question in three different shapes, and reading only
+one of them is how a confident wrong answer gets produced.
+
+| Field | Endpoint | Shape | What it actually means |
+|---|---|---|---|
+| `has_backup_run_records` | `classification` | bool | Only: does a backup **run record** exist. RMAN cannot see an expdp dump, so an instance declared `expdp` is `false` here while being backed up nightly. Never read this as "has a backup". |
+| `determination` | `backups` | 4 states | The per-instance evidence verdict: `verified` / `declared_no_evidence` / `not_tracked` / `unknown`. This is the one that answers the question for a single instance. |
+| `verdict` | `backups-coverage` | 8 states | The fleet-level judgement, which also folds in the offsite track and cluster coverage. `underlying_verdict` shows what the evidence said before suppression. |
+
+Rule of thumb: **one instance → `determination`; the fleet → `verdict`; never `has_backup_run_records`.**
+
+## `verdict` is a computed judgement, and it changes
+
+The same query five hours apart returned different verdicts for instances 97, 59 and 69 — the
+data had not changed, the judging logic had. That is normal (each change fixed a real
+misreading), but it means a verdict is only true as of the `generated_at` in the same response.
+
+Carry `generated_at` with any conclusion built on one, and re-run rather than reusing an
+earlier answer. The same applies to `counts`: they describe the whole matched set, while
+`items` is one page — check `truncated` before treating a list as complete.
+
 ## Metric values carry the platform's own doubts
 
 Rows from `metrics/{id}/latest` may include `data_quality` (`drift` / `outlier` /
