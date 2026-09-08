@@ -213,7 +213,7 @@ python scripts/dba_api_client.py cloud-savings-realized --pending-only --fields 
 python scripts/dba_api_client.py cloud-cost-history --yoy
 ```
 
-Four traps that produce a wrong answer rather than an obviously missing one:
+Five traps that produce a wrong answer rather than an obviously missing one:
 
 1. **`cost_refreshed_at` — carry it with any cost conclusion.** These figures come from a
    daily refresh, not from your request, and they move between reads. Same discipline as
@@ -228,6 +228,14 @@ Four traps that produce a wrong answer rather than an obviously missing one:
    Aliyun instance is voucher-covered.
 4. **Savings are compute-only.** A class change does not shrink storage, so over-provisioned
    disk is in `storage_summary` and in **no** saving figure. "还能省多少" has two pools.
+5. **Cost trend is `paid + coupon`, and neither `paid` nor `gross` alone.** Verified on the
+   production series: `paid` is net of vouchers, so 2025 reads **−67.1%** when consumption
+   barely moved (a ¥344k coupon burn); `gross` is **list price**, so the same year reads
+   **+0.5%** when consumption actually fell 5.7% — the effective discount had moved from
+   47.8% to 44.9% and list price cannot see that. `--yoy` compares on `net_consumption`
+   (= `paid + coupon` = 原价−折扣−舍入) and reports `gross_pct` / `paid_pct` beside it,
+   named. It also flags any year under 12 months `partial` **with a reason** —
+   `series_start` / `year_in_progress` / **`missing_months` (a billing-data gap, go look)**.
 
 `verified_monthly_saving = ¥0` is normal, not a broken pipeline: this fleet is almost all
 包年包月 and a subscription re-prices only at renewal. `verification_basis` says which wait it
@@ -251,11 +259,11 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 4. Treat knowledge-base hits as **prior evidence and references**, not ground truth: weigh them against the current live evidence, and say when your conclusion matches a past confirmed root cause. These endpoints are read-only and return an empty result (`available:false`) when the knowledge corpus is not enabled — degrade quietly, never block the answer.
 
 ### Analysis core group vs. the long tail
-The commands above (`resolve`, `context`, `alert-evidence`, `alerts-list`, `classification`,
+The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classification`,
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
 `directory-options`, `freshness`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
 `probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
-`cloud-rightsizing`, `cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
+`cloud-rightsizing`, `cloud-savings-realized`, `cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
 questions without needing to discover anything.
 

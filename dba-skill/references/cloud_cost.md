@@ -192,9 +192,41 @@ Amounts: `gross` = 原价 (list price, stable trend), `paid` = 应付 = the real
 **already net of contract discount and vouchers**, `coupon` = how much voucher was applied.
 Do not subtract `coupon` from `paid` — that double-counts it.
 
-`--since-cycle` / `--until-cycle` window the monthly series; `--yoy` adds per-year delta and
+`--since-cycle` / `--until-cycle` window the monthly series; `--yoy` adds a per-year delta and
 percentage against the previous year (undefined, reported as `null`, when the prior year is 0
 — a `0%` there would read as "unchanged").
+
+**`--yoy` compares on `net_consumption` = `paid + coupon`. Neither `paid` nor `gross` alone
+is safe.** Measured on the production series:
+
+| 年 | gross 同比 | paid 同比 | **net = paid+券** | 真相 |
+|---|---|---|---|---|
+| 2024 | +1.8% | −8.5% | **−8.6%** | 三者一致 |
+| 2025 | +0.5% | −67.1% | **−5.7%** | 消耗降了 5.7%,paid 说崩了、gross 说持平,都错 |
+| 2026 | −42.4% | +40.9% | **−42.7%** | 确实在降;paid 的"暴涨"只是券见底 |
+
+- `paid` 是**扣券后的现金**:券多的年份看着暴跌,券用尽的年份看着暴涨。
+- `gross` 是**目录价**(折扣前):它看不见折扣率的变化。2025 有效折扣从 47.8% 变到 44.9%,
+  于是「我们谈到了更好的价」被 gross 算成了「没变化」。阿里账单口径那份参考里也写着
+  gross ≈ 应付的 2 倍、**虚高别用**。
+- `net = paid + coupon` = 原价 − 折扣 − 舍入:**券在里面互相抵消,合同折扣已经生效** ——
+  这才是「按我们实际谈到的价格,消耗了多少」。
+
+`gross_pct` 和 `paid_pct` 仍并排给出并单独具名 —— 「目录价趋势」和「现金支出」都是真问题,
+只是都不是**那个**趋势。响应里的 `year_on_year_basis` 带着这句说明。
+
+**任何不满 12 个月的年份标 `partial`,并给出 `partial_reason`。** 三种情况处置完全不同,
+合成一个 `partial` 会把第三种伪装成前两种:
+
+| reason | 含义 | 该做什么 |
+|---|---|---|
+| `series_start` | 数据起点(2021 从 8 月起) | 没事,**永远不会补齐**,别等 |
+| `year_in_progress` | 今年还没过完 | 没事,会自己补齐 |
+| **`missing_months`** | **中间年份缺月** | **★ 账单数据缺口,去查** |
+
+覆盖月数从**未窗口化**的月序列统计,所以 `--since-cycle` 只收窄月度行,不会把窗口内每一年
+都变成假的 `partial`(已实跑验证:`--since-cycle 2026-01 --until-cycle 2026-08` 下
+`months_filtered_by.kept=8`,而 2026 的 `months_covered` 仍是 9)。
 
 ---
 
