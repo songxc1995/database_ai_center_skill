@@ -2241,3 +2241,36 @@ def test_the_downgrade_notice_is_said_once_not_once_per_payload():
         for _ in range(3):
             client_module._redact_outbound({"a": 1})
     assert err.getvalue().count("子串兜底") == 1
+
+
+def test_metric_series_names_which_metrics_are_deprecated_not_just_that_one_is():
+    """★ 不带 --metric-name 时这条命令一次返回多个指标,提示必须点名是哪几个。
+
+    第一版是 `any(deprecated)` + 一句"平台把**这个**指标标记为 deprecated"。
+    生产 inst19 实测:一次返回 21 个指标,其中只有一部分废弃,而那句话既指向不明,
+    又读起来像 21 个全废弃了 —— 一个正确的事实,贴在错误的范围上。
+
+    (`deprecated` 是平台的读时属性:按 instance_type + metric_name 从静态描述表算出、
+    不存在点上,所以同名指标每一行取值必然相同,按 metric_name 归拢就能点名。)
+    """
+    import argparse
+    from unittest import mock
+
+    rows = [{"metric_name": "qps", "value": 1.0, "collected_at": "2026-09-09T00:00:00Z",
+             "granularity": "raw", "deprecated": False},
+            {"metric_name": "old_one", "value": 2.0, "collected_at": "2026-09-09T00:01:00Z",
+             "granularity": "raw", "deprecated": True},
+            {"metric_name": "old_two", "value": 3.0, "collected_at": "2026-09-09T00:02:00Z",
+             "granularity": "raw", "deprecated": True}]
+    args = argparse.Namespace(instance_id=7, ip=None, host=None, metric_name=None,
+                              hours=6, granularity="auto")
+    with mock.patch.object(client_module, "_try_get", return_value=rows), \
+            mock.patch.object(client_module, "_unavailable", return_value=False):
+        out = client_module.cmd_metric_series(args)
+
+    summary = out["summary"]
+    assert summary["deprecated_metrics"] == ["old_one", "old_two"], "没点名是哪几个"
+    note = summary["deprecated_note"]
+    assert "old_one" in note and "old_two" in note
+    assert "qps" not in note, "把没废弃的指标也扯了进来"
+    assert "另外 1 个指标不受影响" in note, "没说清范围,读起来像返回的指标全废弃了"

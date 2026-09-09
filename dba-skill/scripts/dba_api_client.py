@@ -2181,10 +2181,22 @@ def cmd_metric_series(args: argparse.Namespace) -> Any:
                                "first": values[0], "last": values[-1]})
     # 平台在点上标了 deprecated,而基于一个已废弃的指标做趋势判断,值得先知道这件事。
     # 不提的话,"数据齐全"和"数据齐全但这个指标已经不该用了"读起来一样。
-    if any(r.get("deprecated") for r in payload if isinstance(r, dict)):
+    # ★ 点名是哪几个,不要只给一个布尔。不带 --metric-name 时这条命令会一次返回**多个指标**
+    # (生产 inst19 实测 21 个),而第一版的提示写的是"**这个**指标已废弃":既指向不明,
+    # 又读起来像这 21 个全废弃了。`deprecated` 是平台的**读时属性**(按 instance_type +
+    # metric_name 从静态描述表算出,不存在点上),所以同名指标的每一行取值必然相同,
+    # 按 metric_name 归拢即可点名。
+    deprecated_names = sorted({r.get("metric_name") for r in payload
+                               if isinstance(r, dict) and r.get("deprecated")})
+    if deprecated_names:
         out["summary"]["deprecated"] = True
+        out["summary"]["deprecated_metrics"] = deprecated_names
         out["summary"]["deprecated_note"] = (
-            "平台把这个指标标记为 deprecated —— 趋势本身是真的,但先确认它还是不是你要看的那个指标。"
+            "平台把这 %d 个指标标记为 deprecated:%s —— 趋势本身是真的,"
+            "但先确认它们还是不是你要看的那个指标。%s"
+            % (len(deprecated_names), "、".join(deprecated_names),
+               "(本次返回的另外 %d 个指标不受影响。)" % (len(names) - len(deprecated_names))
+               if len(names) > len(deprecated_names) else "")
         )
     if args.metric_name and not payload:
         # ★ 同一个形状的第三次(alerts --severity nosuch → capacity-forecast --metric-name →
