@@ -2499,9 +2499,13 @@ def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
             "谈到的价格消耗了多少)。gross_pct 是目录价口径,看不见折扣率的变化;"
             "paid_pct 是现金口径,受代金券时机扭曲——券多的年份看着暴跌、券用尽的年份看着暴涨。"
             "三者都给出但只有 pct 是趋势。"
-            "partial=true 的年份未满 12 个月,不可与整年直接比;partial_reason 区分"
+            "partial=true 的年份未满 12 个月;partial_reason 区分"
             "series_start(数据起点,永不补齐)/ year_in_progress(会自己补齐)/ "
             "**missing_months(中间年份缺月 = 账单数据缺口,要去查)**。"
+            "★ 这种年份的 pct/delta 已改为**同月对同月**(pct_basis=same_months,"
+            "compared_months 列出是哪几个月),因为拿 9 个月比整年光月份数就有约 −25% 的"
+            "固定偏差、根本不是趋势;年合计对整年的那个数保留为 full_year_pct/full_year_delta,"
+            "它是事实但不能当趋势读。去年缺少对应月份时无法同月对比,标 pct_basis=unequal_months。"
         )
     return payload
 
@@ -2538,13 +2542,20 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     # 每年出现过哪几个**月份号**,而不只是数量 —— 数量分不出「8-12 连续」和「8,9,11,12 有洞」,
     # 而后者才是真正的账单缺口。
     seen: dict[str, set[int]] = {}
+    # 同月对同月要用到逐月净额 —— 不满 12 个月的年份,拿年合计比整年得到的不是趋势。
+    monthly_net: dict[str, dict[int, float]] = {}
     have_months = isinstance(months, list) and bool(months)
     if have_months:
         for m in months:
             if isinstance(m, dict):
                 cycle = str(m.get("cycle") or "")
                 if len(cycle) >= 7 and cycle[4] == "-" and cycle[5:7].isdigit():
-                    seen.setdefault(cycle[:4], set()).add(int(cycle[5:7]))
+                    y, mm = cycle[:4], int(cycle[5:7])
+                    seen.setdefault(y, set()).add(mm)
+                    paid, coupon = m.get("paid"), m.get("coupon")
+                    if isinstance(paid, (int, float)):
+                        monthly_net.setdefault(y, {})[mm] = paid + (
+                            coupon if isinstance(coupon, (int, float)) else 0.0)
 
     def _coverage(year: str) -> tuple[int, str | None]:
         """(月数, partial 的原因)。原因为 None 表示这一年是完整的。
@@ -2647,6 +2658,38 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 "响应里没有 months 序列,无法判断该年是否满 12 个月;partial 未作判定"
             )
         entry["delta"], entry["pct"] = _pct(net, prev_net)
+        entry["pct_basis"] = "full_year"
+        # ★ 不满 12 个月的年份,年合计比整年**根本不是趋势** —— 光月份数就带来固定偏差
+        #   (9 比 12,持平的一年也会显示 −25%)。这个 docstring 上面自己写着,而代码照样
+        #   算了那个数、只在旁边挂一句 partial 的告诫 —— 又是"注释比实现更正确"。
+        #   而这件事有确切答案:拿去年**同样这几个月**比。能算准的问题不该留给读者去折算。
+        #   原来那个整年数不丢,改名 full_year_*:它是事实,只是不能当趋势读。
+        if entry.get("partial") and have_months:
+            cur_months = seen.get(year) or set()
+            try:
+                prev_y = str(int(year) - 1)
+            except (TypeError, ValueError):
+                prev_y = ""
+            prev_have = seen.get(prev_y) or set()
+            if cur_months and cur_months <= prev_have:
+                cur_sum = sum(monthly_net.get(year, {}).get(mm, 0.0) for mm in cur_months)
+                prev_sum = sum(monthly_net.get(prev_y, {}).get(mm, 0.0) for mm in cur_months)
+                lfl_delta, lfl_pct = _pct(round(cur_sum, 2), round(prev_sum, 2))
+                entry["full_year_delta"], entry["full_year_pct"] = entry["delta"], entry["pct"]
+                entry["delta"], entry["pct"] = lfl_delta, lfl_pct
+                entry["pct_basis"] = "same_months"
+                entry["compared_months"] = sorted(cur_months)
+                entry["pct_note"] = (
+                    "本年只有 %d 个月,所以 pct/delta 是拿 %s 年**同样这几个月**比出来的。"
+                    "full_year_pct 是年合计对整年,含 %d 个月的固定偏差,不能当趋势读。"
+                    % (len(cur_months), prev_y, 12 - len(cur_months))
+                )
+            else:
+                entry["pct_basis"] = "unequal_months"
+                entry["pct_note"] = (
+                    "本年不满 12 个月,而去年缺少其中某些月份,**无法同月对比**;"
+                    "这里的 pct 是年合计对整年,含月份数差带来的固定偏差,不是趋势。"
+                )
         entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
         entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
         if isinstance(gross, (int, float)):

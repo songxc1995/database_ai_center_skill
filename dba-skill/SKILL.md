@@ -178,7 +178,12 @@ For asset, ownership, and governance questions:
 2. Use `databases-search` for “某联系人负责哪些库”, “某业务有哪些库”, “按部门/应用/联系人查询”.
 3. Use `ownership-scope` for summary questions about one contact, business, or department.
 4. Use `inventory-summary` for total database, inactive, unused, unowned, unassigned application, and stale discovery counts.
-5. Use `databases-unused` for “哪些库不再使用”.
+5. Use `databases-unused` for “哪些库不再使用” — **but read its `provenance` before answering**.
+   `is_in_use` is hand-maintained and defaults to true, so the list is a **register of what people
+   marked**, not a measurement of who connects. Absence from it means "nobody marked it", not
+   "in use": on 2026-09-09 only 64 of 1,364 databases carried a mark. Saying "the platform found
+   64 unused databases" misattributes a human judgement to the platform, and the implied
+   "the other 1,300 are in use" is false.
 6. Use `classification` for “哪些实例是 RAC / Data Guard / 单实例 / 主从”, “哪些是云 RDS”, and “哪些实例有备份” (topology + cloud + backup inventory).
 
 For live list questions:
@@ -519,7 +524,8 @@ worth a lot less when these disagree.
 ## Field Semantics
 - `business` is the natural-language alias for `service_domain`.
 - `contact` matches both `contact_person` and `technical_contact` unless narrowed with `contact_role=application` or `contact_role=technical`.
-- `unused_databases` means active non-system rows with `is_in_use=false`.
+- `unused_databases` means active non-system rows with `is_in_use=false` — and `is_in_use` is
+  **hand-entered, defaulting to true**. It counts what someone marked, never what was observed.
 - `inactive_databases` means discovery no longer sees the database or it was marked inactive.
 - `unowned_databases` means non-system rows missing application contact or technical contact.
 - `stale_discovery_databases` means `last_refreshed_at` is older than `stale_after_hours`, default `72`.

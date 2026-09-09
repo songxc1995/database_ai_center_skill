@@ -2274,3 +2274,56 @@ def test_metric_series_names_which_metrics_are_deprecated_not_just_that_one_is()
     assert "old_one" in note and "old_two" in note
     assert "qps" not in note, "把没废弃的指标也扯了进来"
     assert "另外 1 个指标不受影响" in note, "没说清范围,读起来像返回的指标全废弃了"
+
+
+def test_a_part_year_is_compared_month_for_month_not_against_a_full_year():
+    """★ 9 个月比 12 个月不是趋势,而这个数原来就摆在 pct 上。
+
+    光月份数就带来约 −25% 的固定偏差:一个花销完全持平的年份,跑完 9 个月会显示 −25%。
+    函数自己的 docstring 早就写着"8 个月比 12 个月不是 −33% 的趋势",**而代码照样算那个数**,
+    只在旁边挂一句 partial 告诫 —— 又一次注释比实现更正确。
+
+    而这件事有确切答案:拿去年**同样这几个月**比。能算准的问题不该留给读者去折算。
+    整年那个数不丢,改名 full_year_pct —— 它是事实,只是不能当趋势读。
+    """
+    years = [{"year": "2025", "gross": 1200.0, "paid": 1200.0, "coupon": 0.0},
+             {"year": "2026", "gross": 900.0, "paid": 900.0, "coupon": 0.0}]
+    # 2025 满 12 个月各 100;2026 只有 1-9 月,也各 100 —— **完全持平**
+    months = ([{"cycle": "2025-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+               for m in range(1, 13)]
+              + [{"cycle": "2026-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+                 for m in range(1, 10)])
+    rows = client_module._year_on_year(years, months)
+    cur = [r for r in rows if r["year"] == "2026"][0]
+
+    assert cur["partial"] is True and cur["months_covered"] == 9
+    assert cur["pct_basis"] == "same_months"
+    assert cur["compared_months"] == list(range(1, 10))
+    assert cur["pct"] == 0.0, "持平的一年被算成了 %s%%" % cur["pct"]
+    assert cur["full_year_pct"] == -25.0, "整年那个数应当保留,只是不再叫 pct"
+    assert "不能当趋势读" in cur["pct_note"]
+
+
+def test_when_last_year_lacks_those_months_it_says_so_instead_of_pretending():
+    """去年缺对应月份 → 无法同月对比,必须明说,而不是悄悄退回整年口径。"""
+    years = [{"year": "2025", "gross": 300.0, "paid": 300.0, "coupon": 0.0},
+             {"year": "2026", "gross": 900.0, "paid": 900.0, "coupon": 0.0}]
+    months = ([{"cycle": "2025-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+               for m in (1, 2, 3)]                      # 去年只有 1-3 月
+              + [{"cycle": "2026-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+                 for m in range(1, 10)])                # 今年 1-9 月
+    cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
+    assert cur["pct_basis"] == "unequal_months"
+    assert "无法同月对比" in cur["pct_note"]
+    assert "full_year_pct" not in cur, "没做同月对比就不该出现 full_year_* 这组名字"
+
+
+def test_a_complete_year_keeps_the_plain_full_year_basis():
+    """满 12 个月的年份不该被卷进来 —— 每一年都挂一段解释,等于没有解释。"""
+    years = [{"year": "2025", "gross": 1200.0, "paid": 1200.0, "coupon": 0.0},
+             {"year": "2026", "gross": 1200.0, "paid": 1200.0, "coupon": 0.0}]
+    months = [{"cycle": "%s-%02d" % (y, m), "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+              for y in ("2025", "2026") for m in range(1, 13)]
+    cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
+    assert cur["pct_basis"] == "full_year"
+    assert "partial" not in cur and "pct_note" not in cur
