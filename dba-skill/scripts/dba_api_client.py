@@ -2684,11 +2684,25 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                     "full_year_pct 是年合计对整年,含 %d 个月的固定偏差,不能当趋势读。"
                     % (len(cur_months), prev_y, 12 - len(cur_months))
                 )
-            else:
-                entry["pct_basis"] = "unequal_months"
+            elif not prev_have:
+                # ★ 序列起点年:上一年**根本不存在**(0 个月),不是"缺了其中某些月份"。
+                #   说成缺月会让人去找一批不存在的账单 —— 诊断不同,动作也不同。
+                #   而这一行的 partial_reason 早就正确地写着 series_start:同一行里两个字段
+                #   给出矛盾的诊断,是我自己造的。生产第一行(2021)走的就是这条。
+                #   pct/delta 为 None 也要说清是哪一种 None:不是数据缺失,是没有可比对象。
+                entry["pct_basis"] = "no_prior_year"
                 entry["pct_note"] = (
-                    "本年不满 12 个月,而去年缺少其中某些月份,**无法同月对比**;"
+                    "序列从这一年开始(上一年在账单数据里一个月都没有),**没有可比的上一年** —— "
+                    "pct/delta 为 null 不是数据缺失,是这个问题在这一年没有答案。"
+                )
+            else:
+                # 上一年存在,但缺了本年有的某些月份 —— 这才是真的同月对不上。
+                entry["pct_basis"] = "unequal_months"
+                entry["missing_in_prior_year"] = sorted(cur_months - prev_have)
+                entry["pct_note"] = (
+                    "本年不满 12 个月,而上一年缺少其中的 %s 月,**无法同月对比**;"
                     "这里的 pct 是年合计对整年,含月份数差带来的固定偏差,不是趋势。"
+                    % "、".join(str(m) for m in sorted(cur_months - prev_have))
                 )
         entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
         entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)

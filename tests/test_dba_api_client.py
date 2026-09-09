@@ -2327,3 +2327,47 @@ def test_a_complete_year_keeps_the_plain_full_year_basis():
     cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
     assert cur["pct_basis"] == "full_year"
     assert "partial" not in cur and "pct_note" not in cur
+
+
+def test_the_first_year_of_the_series_says_there_is_no_prior_year_not_that_months_are_missing():
+    """★ 序列起点年:上一年**根本不存在**,不是「缺了其中某些月份」。
+
+    生产第一行(2021,只有 8–12 月;2020 在 months 里 0 个月)原来被标成 unequal_months,
+    提示写「去年缺少其中某些月份」—— 会让人去找一批**不存在**的账单。诊断不同,动作也不同。
+    而同一行的 partial_reason 早就正确地写着 series_start:**同一行两个字段给出矛盾的诊断**,
+    是我自己造的。
+
+    另外原提示说「这里的 pct 是年合计对整年」,而 pct 和 full_year_pct **都是 null** ——
+    在描述一个不存在的值。null 也要说清是哪一种 null:不是数据缺失,是没有可比对象。
+    """
+    years = [{"year": "2021", "gross": 500.0, "paid": 500.0, "coupon": 0.0},
+             {"year": "2022", "gross": 1200.0, "paid": 1200.0, "coupon": 0.0}]
+    months = ([{"cycle": "2021-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+               for m in (8, 9, 10, 11, 12)]
+              + [{"cycle": "2022-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+                 for m in range(1, 13)])
+    first = client_module._year_on_year(years, months)[0]
+
+    assert first["year"] == "2021" and first["partial_reason"] == "series_start"
+    assert first["pct_basis"] == "no_prior_year", "起点年被说成了缺月"
+    assert first["pct"] is None and first["delta"] is None
+    assert "没有可比的上一年" in first["pct_note"]
+    assert "缺少" not in first["pct_note"], "仍在暗示存在一个残缺的上一年"
+    assert "年合计对整年" not in first["pct_note"], "在描述一个 null 值"
+
+
+def test_a_prior_year_that_really_lacks_those_months_names_them():
+    """真的缺月时才叫 unequal_months,而且要点名缺的是哪几个月 —— 不然没法去查。"""
+    years = [{"year": "2024", "gross": 300.0, "paid": 300.0, "coupon": 0.0},
+             {"year": "2025", "gross": 300.0, "paid": 300.0, "coupon": 0.0},
+             {"year": "2026", "gross": 500.0, "paid": 500.0, "coupon": 0.0}]
+    months = ([{"cycle": "2024-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+               for m in (1, 2, 3)]
+              + [{"cycle": "2025-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+                 for m in (1, 2, 3)]                       # 上一年只有 1-3 月
+              + [{"cycle": "2026-%02d" % m, "gross": 100.0, "paid": 100.0, "coupon": 0.0}
+                 for m in (1, 2, 3, 4, 5)])                # 本年 1-5 月
+    cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
+    assert cur["pct_basis"] == "unequal_months"
+    assert cur["missing_in_prior_year"] == [4, 5], "没点名缺哪几个月"
+    assert "4、5 月" in cur["pct_note"]
