@@ -532,13 +532,13 @@ class DbaApiClientTest(unittest.TestCase):
 
     def test_elk_search_sends_host_time_and_level_filters(self):
         result = self.run_client(
-            "elk-search", "--host-ip", "10.101.240.83", "--levels", "ERROR,FATAL",
+            "elk-search", "--host-ip", "192.0.2.10", "--levels", "ERROR,FATAL",
             "--start", "2026-07-30T00:00:00Z", "--size", "50",
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         request = RecordingHandler.requests[0]
         self.assertEqual(request["path"], "/api/v2/elk/search")
-        self.assertEqual(request["query"]["host_ip"], ["10.101.240.83"])
+        self.assertEqual(request["query"]["host_ip"], ["192.0.2.10"])
         self.assertEqual(request["query"]["levels"], ["ERROR,FATAL"])
         self.assertEqual(request["query"]["start"], ["2026-07-30T00:00:00Z"])
         self.assertEqual(request["query"]["size"], ["50"])
@@ -871,12 +871,12 @@ def test_csv_is_written_for_a_spreadsheet_not_a_terminal():
     """--format table 截断到 60 字符、把列表渲染成 JSON —— 终端里对,发给负责人的文件里不对:
     名字不能在第 60 个字符处被切断。"""
     csv_text = client_module._to_csv({"items": [
-        {"id": 9, "owners": ["李太平", "谢涛燕"], "note": None},
+        {"id": 9, "owners": ["张三", "李四"], "note": None},
         {"id": 27, "owners": [], "note": "x" * 80},
     ]})
     lines = csv_text.strip().splitlines()
     assert lines[0] == "id,owners,note"
-    assert "李太平; 谢涛燕" in lines[1]
+    assert "张三; 李四" in lines[1]
     assert lines[1].endswith(",")           # None → 空单元格
     assert "x" * 80 in lines[2], "不截断"
 
