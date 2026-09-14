@@ -121,7 +121,7 @@ filter. A trend 60 days out will never appear in the alert list — that lead ti
 ## Required Config
 Read these values from environment variables or runtime config:
 
-- `PROJECT_API_BASE_URL`, for example `http://10.101.240.250:8080/api/v2`
+- `PROJECT_API_BASE_URL`, for example `http://<platform-host>:8080/api/v2`
 - `PROJECT_API_KEY`
 
 Optional:
@@ -163,7 +163,7 @@ python scripts/dba_api_client.py ai-endpoints
 python scripts/dba_api_client.py get /dashboard/trends --param hours=6 --param bucket_minutes=15
 python scripts/dba_api_client.py elk-status
 python scripts/dba_api_client.py elk-coverage
-python scripts/dba_api_client.py elk-search --host-ip 10.101.240.83 --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
+python scripts/dba_api_client.py elk-search --host-ip <db-host-ip> --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
 python scripts/dba_api_client.py cloud-rightsizing --window-days 30 --vendor huawei
 python scripts/dba_api_client.py cloud-cost-history
 python scripts/dba_api_client.py backups --instance-id 12
@@ -468,7 +468,7 @@ it never changes a setup that already works.
 
 ```
 # ~/.dba-skill/config      (chmod 600 on POSIX — the key is a credential)
-PROJECT_API_BASE_URL=http://10.101.240.250:8080/api/v2
+PROJECT_API_BASE_URL=http://<platform-host>:8080/api/v2
 PROJECT_API_KEY=<your key>
 ```
 

@@ -1047,7 +1047,7 @@ def _csv_cell(value: Any) -> str:
     """A cell a spreadsheet can use.
 
     `_cell` renders a list as JSON and truncates at 60 characters — right for a terminal
-    table, wrong for a file someone opens in Excel and mails on: ["李太平", "谢涛燕"] should
+    table, wrong for a file someone opens in Excel and mails on: ["张三", "李四"] should
     read as a list of names, and a name must not be cut in half at the 60th character.
     """
     if value is None:
