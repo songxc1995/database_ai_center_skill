@@ -274,6 +274,10 @@ Five traps that produce a wrong answer rather than an obviously missing one:
    (= `paid + coupon` = 原价−折扣−舍入) and reports `gross_pct` / `paid_pct` beside it,
    named. It also flags any year under 12 months `partial` **with a reason** —
    `series_start` / `year_in_progress` / **`missing_months` (a billing-data gap, go look)**.
+   A partial year is compared against the **same months** of the year before
+   (`pct_basis=same_months`) — **all three groups together**; the full-year figures move to
+   `full_year_*`. A group with no monthly data comes back `null` with the reason in `pct_note`,
+   never quietly left on the full-year basis beside a same-months `pct`.
 
 `verified_monthly_saving = ¥0` is normal, not a broken pipeline: this fleet is almost all
 包年包月 and a subscription re-prices only at renewal. `verification_basis` says which wait it

@@ -215,6 +215,10 @@ is safe.** Measured on the production series:
 `gross_pct` 和 `paid_pct` 仍并排给出并单独具名 —— 「目录价趋势」和「现金支出」都是真问题,
 只是都不是**那个**趋势。响应里的 `year_on_year_basis` 带着这句说明。
 
+★ 不满 12 个月的年份,**三组一起**按上一年同样的月份比较(`pct_basis=same_months`),整年那组数
+改名 `full_year_*`。某一组缺逐月数据就置 `null` 并在 `pct_note` 里说明 —— 绝不在同一行里让
+net 走同月、gross/paid 还走整年(2026-09-14 测评 P0:那样 gross_pct 读作 −40.7%,同月真值 −24.3%)。
+
 **任何不满 12 个月的年份标 `partial`,并给出 `partial_reason`。** 三种情况处置完全不同,
 合成一个 `partial` 会把第三种伪装成前两种:
 

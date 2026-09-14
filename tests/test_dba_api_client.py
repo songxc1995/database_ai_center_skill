@@ -2371,3 +2371,43 @@ def test_a_prior_year_that_really_lacks_those_months_names_them():
     assert cur["pct_basis"] == "unequal_months"
     assert cur["missing_in_prior_year"] == [4, 5], "没点名缺哪几个月"
     assert "4、5 月" in cur["pct_note"]
+
+
+
+def test_all_three_groups_share_the_same_months_basis():
+    """★ 2026-09-14 测评 P0:同月修复只修了 net 这一组。
+
+    同一行标着 pct_basis=same_months,gross / paid 两组却仍是 9 个月比 12 个月,pct_note 也不提。
+    生产 2026:gross_pct 读作 −40.7%,同月真值 −24.3%。三组的同月值和整年值在这里刻意各不相同,
+    任何一组悄悄留在整年口径都会被抓到。
+    """
+    years = [{"year": "2025", "gross": 1200.0, "paid": 600.0, "coupon": 120.0},
+             {"year": "2026", "gross": 900.0, "paid": 540.0, "coupon": 90.0}]
+    months = ([{"cycle": "2025-%02d" % m, "gross": 100.0, "paid": 50.0, "coupon": 10.0}
+               for m in range(1, 13)]
+              + [{"cycle": "2026-%02d" % m, "gross": 100.0, "paid": 60.0, "coupon": 10.0}
+                 for m in range(1, 10)])
+    cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
+
+    assert cur["pct_basis"] == "same_months"
+    # 同月:gross 900 vs 900 → 0%;paid 540 vs 450 → +20%;net 630 vs 540 → +16.7%
+    assert (cur["gross_pct"], cur["gross_delta"]) == (0.0, 0.0), "gross 还在整年口径"
+    assert (cur["paid_pct"], cur["paid_delta"]) == (20.0, 90.0), "paid 还在整年口径"
+    assert cur["pct"] == 16.7
+    # 整年那组保留、换名:它是事实,只是不能当趋势读
+    assert cur["full_year_gross_pct"] == -25.0 and cur["full_year_paid_pct"] == -10.0
+    assert "gross_pct" in cur["pct_note"] and "paid_pct" in cur["pct_note"]
+
+
+def test_a_group_without_monthly_data_is_emptied_not_left_on_the_full_year():
+    """某组缺逐月数据时算不出同月值 —— 必须置空并说出来,不能悄悄留着整年那个数。"""
+    years = [{"year": "2025", "gross": 1200.0, "paid": 1200.0, "coupon": 0.0},
+             {"year": "2026", "gross": 900.0, "paid": 900.0, "coupon": 0.0}]
+    months = ([{"cycle": "2025-%02d" % m, "paid": 100.0, "coupon": 0.0} for m in range(1, 13)]
+              + [{"cycle": "2026-%02d" % m, "paid": 100.0, "coupon": 0.0} for m in range(1, 10)])
+    cur = [r for r in client_module._year_on_year(years, months) if r["year"] == "2026"][0]
+    assert cur["pct_basis"] == "same_months"
+    assert cur["gross_pct"] is None and cur["gross_delta"] is None
+    assert cur["full_year_gross_pct"] == -25.0
+    assert "gross 缺逐月数据" in cur["pct_note"]
+    assert cur["paid_pct"] == 0.0

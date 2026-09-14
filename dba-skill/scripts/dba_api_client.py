@@ -2544,6 +2544,9 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
     seen: dict[str, set[int]] = {}
     # 同月对同月要用到逐月净额 —— 不满 12 个月的年份,拿年合计比整年得到的不是趋势。
     monthly_net: dict[str, dict[int, float]] = {}
+    # gross / paid 也要逐月:同月对比必须**三组一起**做,否则同一行里混着两种口径。
+    monthly_gross: dict[str, dict[int, float]] = {}
+    monthly_paid: dict[str, dict[int, float]] = {}
     have_months = isinstance(months, list) and bool(months)
     if have_months:
         for m in months:
@@ -2552,10 +2555,13 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 if len(cycle) >= 7 and cycle[4] == "-" and cycle[5:7].isdigit():
                     y, mm = cycle[:4], int(cycle[5:7])
                     seen.setdefault(y, set()).add(mm)
-                    paid, coupon = m.get("paid"), m.get("coupon")
+                    paid, coupon, gross_m = m.get("paid"), m.get("coupon"), m.get("gross")
                     if isinstance(paid, (int, float)):
                         monthly_net.setdefault(y, {})[mm] = paid + (
                             coupon if isinstance(coupon, (int, float)) else 0.0)
+                        monthly_paid.setdefault(y, {})[mm] = paid
+                    if isinstance(gross_m, (int, float)):
+                        monthly_gross.setdefault(y, {})[mm] = gross_m
 
     def _coverage(year: str) -> tuple[int, str | None]:
         """(月数, partial 的原因)。原因为 None 表示这一年是完整的。
@@ -2658,6 +2664,8 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 "响应里没有 months 序列,无法判断该年是否满 12 个月;partial 未作判定"
             )
         entry["delta"], entry["pct"] = _pct(net, prev_net)
+        entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
+        entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
         entry["pct_basis"] = "full_year"
         # ★ 不满 12 个月的年份,年合计比整年**根本不是趋势** —— 光月份数就带来固定偏差
         #   (9 比 12,持平的一年也会显示 −25%)。这个 docstring 上面自己写着,而代码照样
@@ -2679,11 +2687,31 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 entry["delta"], entry["pct"] = lfl_delta, lfl_pct
                 entry["pct_basis"] = "same_months"
                 entry["compared_months"] = sorted(cur_months)
+                # ★ 三组必须同一个口径。a348a32 只把 net 这组换成了同月,gross / paid 两组仍是
+                #   9 个月比 12 个月,pct_note 却一个字不提 —— 生产 2026:gross_pct 读作 −40.7%,
+                #   同月真值 −24.3%,差 16 个百分点(2026-09-14 测评 P0)。同一行里混两种口径比
+                #   全错更难发现:net 那个数是对的,读的人会默认旁边的也对。
+                missing_groups = []
+                for label, monthly in (("gross", monthly_gross), ("paid", monthly_paid)):
+                    entry["full_year_%s_delta" % label] = entry["%s_delta" % label]
+                    entry["full_year_%s_pct" % label] = entry["%s_pct" % label]
+                    cur_m, prev_m = monthly.get(year, {}), monthly.get(prev_y, {})
+                    if all(mm in cur_m and mm in prev_m for mm in cur_months):
+                        entry["%s_delta" % label], entry["%s_pct" % label] = _pct(
+                            round(sum(cur_m[mm] for mm in cur_months), 2),
+                            round(sum(prev_m[mm] for mm in cur_months), 2))
+                    else:
+                        # 缺逐月数据就算不出同月值 —— 置空并说出来,绝不悄悄留下整年那个数。
+                        entry["%s_delta" % label] = entry["%s_pct" % label] = None
+                        missing_groups.append(label)
                 entry["pct_note"] = (
-                    "本年只有 %d 个月,所以 pct/delta 是拿 %s 年**同样这几个月**比出来的。"
-                    "full_year_pct 是年合计对整年,含 %d 个月的固定偏差,不能当趋势读。"
+                    "本年只有 %d 个月,所以 pct/delta、gross_pct/gross_delta、paid_pct/paid_delta "
+                    "三组都是拿 %s 年**同样这几个月**比出来的。full_year_* 是年合计对整年,"
+                    "含 %d 个月的固定偏差,不能当趋势读。"
                     % (len(cur_months), prev_y, 12 - len(cur_months))
                 )
+                if missing_groups:
+                    entry["pct_note"] += "(%s 缺逐月数据,无法同月对比,已置空)" % "、".join(missing_groups)
             elif not prev_have:
                 # ★ 序列起点年:上一年**根本不存在**(0 个月),不是"缺了其中某些月份"。
                 #   说成缺月会让人去找一批不存在的账单 —— 诊断不同,动作也不同。
@@ -2701,11 +2729,9 @@ def _year_on_year(years: Any, months: Any = None) -> Any:
                 entry["missing_in_prior_year"] = sorted(cur_months - prev_have)
                 entry["pct_note"] = (
                     "本年不满 12 个月,而上一年缺少其中的 %s 月,**无法同月对比**;"
-                    "这里的 pct 是年合计对整年,含月份数差带来的固定偏差,不是趋势。"
+                    "这里的 pct、gross_pct、paid_pct 都是年合计对整年,含月份数差带来的固定偏差,不是趋势。"
                     % "、".join(str(m) for m in sorted(cur_months - prev_have))
                 )
-        entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
-        entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
         if isinstance(gross, (int, float)):
             prev_gross = gross
         if isinstance(paid, (int, float)):
