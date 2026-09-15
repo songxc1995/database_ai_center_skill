@@ -2431,3 +2431,25 @@ def test_partial_result_advice_is_runnable_when_the_endpoint_does_not_page(monke
     assert "page guard" not in message and "--param" not in message, message
     assert "does not page" in message and "--limit" in message
 
+
+
+def test_a_connection_that_breaks_mid_response_is_a_structured_error(monkeypatch, capsys):
+    """getresponse() runs outside urllib's URLError wrapping, so a server that dropped the
+    connection after the request went out escaped as a raw traceback instead of an error
+    the caller can read (seen once on a `cloud-rightsizing --all` fan-out)."""
+    import http.client
+    import json as _json
+
+    import pytest as _pytest
+
+    def _drop(*_a, **_k):
+        raise http.client.RemoteDisconnected("Remote end closed connection without response")
+
+    monkeypatch.setattr(client_module, "_base_url", lambda: "http://example.invalid/api/v2")
+    monkeypatch.setattr(client_module, "_api_key", lambda: "k")
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", _drop)
+    with _pytest.raises(SystemExit):
+        client_module._http_call("GET", "/dba/alerts")
+    payload = _json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["error"] == "network_error"
+    assert "RemoteDisconnected" in payload["message"]

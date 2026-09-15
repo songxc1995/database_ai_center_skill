@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 from datetime import datetime, timedelta, timezone
 import os
@@ -1405,6 +1406,11 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
         _fail("network_error", f"{method} {path} failed: {exc.reason}")
     except TimeoutError:
         _fail("network_error", f"{method} {path} timed out")
+    except (http.client.HTTPException, ConnectionError) as exc:
+        # The request went out and the connection broke on the way back: getresponse() runs
+        # outside urllib's URLError wrapping, and read() can end short (IncompleteRead). Left
+        # uncaught it surfaced as a raw traceback instead of an error the caller can read.
+        _fail("network_error", f"{method} {path} failed mid-response: {type(exc).__name__}: {exc}")
     except json.JSONDecodeError as exc:
         _fail("invalid_json", f"{method} {path} returned invalid JSON: {exc}")
 
