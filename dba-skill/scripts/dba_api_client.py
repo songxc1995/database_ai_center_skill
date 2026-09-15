@@ -368,14 +368,26 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
     if meta.get("truncated") is True or (isinstance(total, int) and total > len(items)):
         # The advice has to match what the caller already did. Telling someone who passed
         # --all to "re-run with --all" is how a warning trains people to ignore warnings.
-        if _FETCH_ALL:
+        # ★ ...and it has to be advice that works. --all only pages envelopes that carry
+        #   offset/limit or page/page_size; for the rest (e.g. `alerts` → /dba/alerts) it made no
+        #   further request, yet this said "stopped at the page guard" and offered
+        #   `--param limit=1000` — a usage error on that command (2026-09-15 eval).
+        pages = any(k in meta for k in ("offset", "limit", "page", "page_size"))
+        if _FETCH_ALL and pages:
             advice = (
-                f"--all stopped at the {_MAX_PAGES}-page guard. Raise it with "
-                f"--max-pages N, ask for bigger pages with --param limit=1000, or narrow "
-                f"the query. Use --count-only when you just need the total."
+                f"--all stopped at the {_MAX_PAGES}-page guard. Raise it with --max-pages N, "
+                f"ask for bigger pages with the command's --limit / --page-size, or narrow the "
+                f"query. Use --count-only when you just need the total."
             )
-        else:
+        elif _FETCH_ALL:
+            advice = (
+                "this endpoint does not page, so --all had nothing more to fetch. Raise the "
+                "command's --limit (the endpoint may cap it) or narrow the filters."
+            )
+        elif pages:
             advice = "re-run with --all, or page with offset/page."
+        else:
+            advice = "this endpoint does not page: raise the command's --limit or narrow the filters."
         sys.stderr.write(
             json.dumps(
                 {

@@ -2411,3 +2411,23 @@ def test_a_group_without_monthly_data_is_emptied_not_left_on_the_full_year():
     assert cur["full_year_gross_pct"] == -25.0
     assert "gross 缺逐月数据" in cur["pct_note"]
     assert cur["paid_pct"] == 0.0
+
+
+def test_partial_result_advice_is_runnable_when_the_endpoint_does_not_page(monkeypatch):
+    """2026-09-15 eval: `alerts --all` said "stopped at the 50-page guard" and suggested
+    `--param limit=1000`, though /dba/alerts has no paging and `alerts` has no --param."""
+    import contextlib
+    import io
+    import json
+
+    monkeypatch.setattr(client_module, "_FETCH_ALL", True)
+    monkeypatch.setattr(client_module, "_COUNT_ONLY", False)
+    monkeypatch.setattr(client_module, "_SUMMARY_ONLY", False)
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        client_module._warn_if_truncated(
+            {"total": 2645, "truncated": True, "items": [{"id": i} for i in range(200)]}, "/dba/alerts")
+    message = json.loads(buf.getvalue().strip().splitlines()[-1])["message"]
+    assert "page guard" not in message and "--param" not in message, message
+    assert "does not page" in message and "--limit" in message
+
