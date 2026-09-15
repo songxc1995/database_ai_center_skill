@@ -2549,4 +2549,3 @@ def test_a_non_404_failure_on_the_instance_still_degrades(monkeypatch):
     args = argparse.Namespace(instance_id=9999, ip=None, host=None)
     out = client_module.cmd_instance(args)
     assert out["instance"]["unavailable"] is True and out["instance"]["status_code"] == 500
-\n
