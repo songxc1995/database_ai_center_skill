@@ -542,6 +542,31 @@ worth a lot less when these disagree.
 - `stale_discovery_databases` means `last_refreshed_at` is older than the discovery cycle: on `3.79+`
   `database_discovery_refresh_after_hours + 24h` (192h) by default, `72h` on older servers.
   `filters.stale_after_hours` echoes the value actually used.
+- **Search found nothing? Read `suggestions` first** (`3.81+`). The search is a plain substring match,
+  so a typo and a genuinely absent name both return `total=0`. `suggestions` lists close values the
+  platform really holds (`field` + `value`). Ask the user whether they meant one of them — never answer
+  "does not exist" while `suggestions` is non-empty. An empty list means nothing close exists either.
+- `matched_on` (`3.81+`, per search row) names the fields `--q` matched: a row can be returned for its
+  business domain or contact, not its name. `null` means the search had no `--q`.
+- `inactive_reason` / `inactive_since` / `inactive_detail` (`3.81+`, on instances): `vendor_absent` =
+  the cloud provider no longer lists it; `disabled` = monitoring switched off by a person; `unknown` =
+  nothing recorded. Quote the reason instead of guessing why an instance is inactive.
+- `instances_with_matched_databases` is the honest name for `total_instances` — instances appearing
+  in the matched database rows, **not** the fleet; the fleet denominator is `coverage.instances_in_scope`.
+- `backup-method` carries `set_by` / `set_at` (`3.81+`); `null` with `set_note` (`3.82+`) means the
+  declaration predates recording — say it cannot be traced, do not substitute another time.
+- Backups (`3.82.1+`): `effective_last_success_at` + `last_success_basis` are the success time the verdict
+  used — `rman` (the platform's RMAN pull), `reported` (a pushed report's own time) or `report_time`
+  (a success reported without a time, dated by the report — say so). Both are null when the verdict did
+  not use any local success — including an RMAN snapshot left from before an expdp/external method was
+  declared. `summary.last_success_at` stays exactly as the source sent it; do not quote it as the success
+  time when `effective_last_success_at` is null.
+- Directory (`3.82+`): `owned_database_count` per entry; `0` is a registered entry that owns nothing on
+  record, not a sync error (the directory caches the upstream system; ownership is each database's own
+  metadata). Inventory coverage (`3.82+`) counts `instances_without_environment`,
+  `instances_with_inferred_role` and `databases_without_department`: a count grouped by those fields
+  covers only what was filled in — say how many were left out.
+- `created_at` on an instance is when the platform started managing it, not the resource's age.
 
 ## Output Guidance
 For statistics or lookup questions, return:
