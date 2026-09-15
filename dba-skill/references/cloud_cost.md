@@ -34,9 +34,14 @@ total_monthly_saving              = Σ saving over ALL is_candidate rows
 └── (remainder)                   = candidates in insufficient_evidence / blocked / no_target
 ```
 
-The three named sub-figures do **not** add up to the total — the remainder is real and is not
-surfaced under any name of its own. On 2026-09-08 that remainder was ¥332.75 across 21 rows.
-If you present a breakdown, either include the remainder or say the breakdown is partial.
+The three named sub-figures do **not** add up to the total. The remainder is the money in
+`insufficient_evidence` / `blocked` / `no_target` — savings the platform itself does not stand behind.
+
+`3.77+`: `saving_by_state` splits `total_monthly_saving` by `shortlist_state`
+(`{count, monthly_saving}` per state) and its parts **do** sum to the total (`saving_breakdown_note`
+says so). Build any breakdown from it, and never report the `insufficient_evidence` or `blocked`
+money as "can save". On older servers the remainder has no field of its own — derive it per row
+from `shortlist_state` + `monthly_saving`, or say the breakdown is partial.
 
 **Never add `realizable` to `pending_review`** and call it "what we can save this quarter":
 the second is money nobody has approved. That over-promise is the exact thing the tiering
@@ -53,6 +58,7 @@ exists to prevent.
 
 They differ by the rows whose saving only arrives at renewal, so `actionable_count` is always
 ≤ the other. Neither is wrong; picking the wrong one silently changes what you claimed.
+`3.77+` names the gap: `actionable_count + deferred_count == shortlist_states.actionable`.
 
 - "有多少台可以降配" → `shortlist_states.actionable`
 - "这个季度能落袋多少台" → `actionable_count` (pairs with `realizable_monthly_saving`)
@@ -66,6 +72,10 @@ They differ by the rows whose saving only arrives at renewal, so `actionable_cou
 | `monthly_cost` | **catalogue price** at contract discount. Same basis as `monthly_saving`, which is why saving ≤ cost holds |
 | `real_monthly_bill` | what the **invoice** said for one instance, last closed cycle |
 | `total_real_bill` | fleet sum of the above, **run-rate rows only** |
+
+`3.77+`: `total_real_bill_scope` says which vendors and billing cycles that sum covers. It is **not**
+the same measure as `cloud-cost-history` (account-level, Aliyun only): for "上个月花了多少" name the
+measure you quote, and never cross-check or add the two.
 
 包年包月 is billed as a whole term up front, not amortised, so an instance that did not renew
 this cycle shows a real bill of ¥0 while genuinely costing money. That is why the platform
@@ -85,6 +95,15 @@ with the other.
 **Coverage limit:** per-instance voucher data exists for **Huawei only**. Aliyun accounts for
 vouchers at account/cycle level, so an empty `coupon_funded` list does **not** mean no Aliyun
 instance is voucher-covered. `coupon_funded.note` says this in the response; quote it.
+
+### Edge cloud (Huawei CloudPond) is excluded from analysis — not free
+
+Edge instances (`is_edge: true`, judged from the spec, **not** from the name — a name containing
+`ies` does not make an instance edge) get no catalogue price and no downsize analysis, so
+`monthly_cost` is null and the cash bill is often ¥0. They still bill: a voucher pays it, and when
+the voucher runs out it becomes cash. `3.77+`: `edge_cloud` carries `count`, `cash_monthly` and
+`coupon_funded_monthly` — that is the answer to "边缘云花多少钱". Older servers gave a reason
+reading "不做成本与降配分析"; never read it as "costs nothing".
 
 ---
 
