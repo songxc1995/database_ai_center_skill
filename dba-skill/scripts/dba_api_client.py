@@ -2104,18 +2104,31 @@ def cmd_topology(args: argparse.Namespace) -> Any:
             "nodes_unmanaged": sum(1 for n in nodes.values() if n.get("external")),
             "note": (
                 "复制关系里带 ext: 的一端是**未纳管**主机。/clusters 结构上只能显示纳管成员,"
-                "所以用它回答「主备是谁」会给出一个**残缺但看起来完整**的答案 —— "
-                "这里的 edges_touching_unmanaged 就是它看不见的部分。"
+                "所以复制链上有外部主机时,用它回答「主备是谁」会给出一个**残缺但看起来完整**的答案 —— "
+                "这里的 edges_touching_unmanaged 就是它看不见的部分。反过来的情况也有:MGR 组复制"
+                "在平台 3.80 之前不画边,实例带 cluster_id 却没有边时,完整答案在 /clusters/{id}/members。"
             ),
         },
     }
     if focus is not None and not rows:
         # 空结果要说清是哪一种空。
-        out["note"] = (
-            "实例 %s 在拓扑里没有任何复制边。★ 这有两种含义,而它们长得一样:"
-            "「它确实是单机」,或者「复制关系没被发现」——拓扑是从各实例自己上报的主从信息推的,"
-            "一端不上报就整条边都看不到。**不要据此断言它没有备库。**" % focus
-        )
+        cluster_id = (nodes.get(focus) or {}).get("cluster_id")
+        if cluster_id is not None:
+            # 它在集群里:成员与角色的答案就在集群那边,别把人引到"查不到主备"。
+            # 生产 MGR 19 号集群:/clusters/19/members 主从齐全,拓扑 0 条边(平台 3.80 之前
+            # 组复制不画边),而原来这里只会说"两种含义、不要据此断言"。
+            out["note"] = (
+                "实例 %s 在拓扑里没有复制边,但它属于集群 %s —— 成员与角色(谁是主、谁是从)"
+                "看 get /clusters/%s/members,那里是完整答案。拓扑只画各实例上报的主从关系,"
+                "MGR 组复制在平台 3.80 之前不画边。" % (focus, cluster_id, cluster_id)
+            )
+            out["cluster_id"] = cluster_id
+        else:
+            out["note"] = (
+                "实例 %s 在拓扑里没有任何复制边。★ 这有两种含义,而它们长得一样:"
+                "「它确实是单机」,或者「复制关系没被发现」——拓扑是从各实例自己上报的主从信息推的,"
+                "一端不上报就整条边都看不到。**不要据此断言它没有备库。**" % focus
+            )
     return out
 
 

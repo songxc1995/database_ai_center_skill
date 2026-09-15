@@ -1736,6 +1736,21 @@ class TopologyAndSeriesHelperTest(unittest.TestCase):
         self.assertEqual(out["items"], [])
         self.assertIn("不要据此断言", out["note"])
 
+    def test_a_cluster_member_with_no_edges_is_pointed_at_its_cluster(self):
+        """生产 MGR 集群 19:/clusters/19/members 主从齐全,拓扑 0 条边。原来这里只会说
+        "两种含义、不要据此断言",agent 于是答"查不到主备" —— 答案其实就在集群那边。"""
+        from unittest import mock
+
+        payload = {"nodes": [{"id": 20, "name": "mgr-a", "external": False, "cluster_id": 19,
+                              "role_detail": "mgr_primary"}], "edges": []}
+        args = argparse.Namespace(instance_id=20, ip=None, host=None, external_only=False)
+        with mock.patch.object(client_module, "_request", return_value=payload):
+            out = client_module.cmd_topology(args)
+        self.assertEqual(out["items"], [])
+        self.assertIn("/clusters/19/members", out["note"])
+        self.assertEqual(out["cluster_id"], 19)
+        self.assertNotIn("不要据此断言", out["note"], "有集群可查时不该把人引到'查不到'")
+
     def test_a_422_from_the_series_endpoint_is_the_answer_not_a_failure(self):
         """★ 平台用 422 说明「这个指标没有该粒度的汇总,所以这个窗口什么都给不出」——
         那正是提问者需要知道的。塞进 http_error 里等于把答案降级成报错,读的人会以为
