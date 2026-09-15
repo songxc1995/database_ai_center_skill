@@ -338,3 +338,10 @@ the alert list, and that lead time is the entire reason to ask.
 `freshness --instance-id N` says how current the data is. A healthy-looking instance whose
 collection stopped yesterday is not healthy — it is unobserved. Alert timestamps are likewise
 measured against the last report, not against now, for sources that push on a schedule.
+
+`stale_evidence: ["database_discovery"]` is judged on the discovery sweep's own cycle on `3.79+`
+(`database_discovery_stale_after_hours`, 192h by default): the nightly sweep re-walks an instance
+only every 168h, so a younger result is the sweep working, not stale data. Older servers used the
+72h collection rule and flagged most of the fleet — read the label as noise there. A cluster member
+whose database inventory the owner holds is not judged at all; `database_discovery_note` names the
+owner. Collection / metrics / health staleness still uses `stale_after_hours` (72h).

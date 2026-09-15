@@ -534,8 +534,14 @@ worth a lot less when these disagree.
 - `unused_databases` means active non-system rows with `is_in_use=false` — and `is_in_use` is
   **hand-entered, defaulting to true**. It counts what someone marked, never what was observed.
 - `inactive_databases` means discovery no longer sees the database or it was marked inactive.
-- `unowned_databases` means non-system rows missing application contact or technical contact.
-- `stale_discovery_databases` means `last_refreshed_at` is older than `stale_after_hours`, default `72`.
+- `unowned_databases` means non-system rows missing **at least one** of application contact /
+  technical contact — not "no owner". On `3.79+` it is split: `no_contact_databases` (neither —
+  the answer to "哪些库没有负责人"), `missing_technical_contact_only`, `missing_application_contact_only`;
+  the three sum to it. Department and both contacts are propagated from the application directory by
+  business domain, so a row with no `service_domain` usually lacks all three.
+- `stale_discovery_databases` means `last_refreshed_at` is older than the discovery cycle: on `3.79+`
+  `database_discovery_refresh_after_hours + 24h` (192h) by default, `72h` on older servers.
+  `filters.stale_after_hours` echoes the value actually used.
 
 ## Output Guidance
 For statistics or lookup questions, return:
