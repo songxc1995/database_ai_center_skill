@@ -2106,7 +2106,7 @@ def cmd_topology(args: argparse.Namespace) -> Any:
                 "复制关系里带 ext: 的一端是**未纳管**主机。/clusters 结构上只能显示纳管成员,"
                 "所以复制链上有外部主机时,用它回答「主备是谁」会给出一个**残缺但看起来完整**的答案 —— "
                 "这里的 edges_touching_unmanaged 就是它看不见的部分。反过来的情况也有:MGR 组复制"
-                "在平台 3.80 之前不画边,实例带 cluster_id 却没有边时,完整答案在 /clusters/{id}/members。"
+                "在平台 3.80 之前不画边,MGR 实例带 cluster_id 却没有边时,成员与角色看 /clusters/{id}/members。"
             ),
         },
     }
@@ -2117,10 +2117,17 @@ def cmd_topology(args: argparse.Namespace) -> Any:
         if cluster_id is not None:
             # 它在集群里:成员与角色在集群那边,别把人引到"查不到主备"。但没有边的**原因**因集群
             # 类型而异,套错了会让 agent 把原因说错(复查:MGR 那句一度被套到 RAC、DG 备库上)。
-            role = str(focus_node.get("role_detail") or focus_node.get("instance_role") or "").lower()
-            if any(t in role for t in ("standby", "replica")) and not role.startswith("mgr_"):
+            detail = str(focus_node.get("role_detail") or "").lower()
+            coarse = str(focus_node.get("instance_role") or "").lower()
+            # 两个字段都看:DG 备库常是 instance_role=physical_standby、role_detail=active_dg ——
+            # 只看 role_detail 会把它漏进通用分支(复查:inst63 就是这样)。
+            is_mirror = (not detail.startswith("mgr_")) and (
+                any(t in coarse for t in ("standby", "replica"))
+                or any(t in detail for t in ("standby", "replica", "dg"))
+            )
+            if is_mirror:
                 why = "它和主库之间的复制关系没有上报到拓扑(拓扑只画各实例自己上报的主从信息)。"
-            elif role.startswith("mgr_"):
+            elif detail.startswith("mgr_"):
                 why = "MGR 组复制在平台 3.80 之前不画边。"
             elif focus_node.get("is_rac"):
                 why = "RAC 节点共享同一个库,节点之间本来就没有复制边。"
