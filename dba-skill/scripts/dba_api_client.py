@@ -1794,6 +1794,20 @@ def _try_get_shared(path: str, params: dict[str, Any] | None = None) -> Any:
     return payload
 
 
+def _fail_if_instance_missing(instance_id: Any, detail: Any) -> None:
+    """A 404 on the instance itself ends the composite answer — it does not degrade it.
+
+    The composite commands degrade a part that fails to load, which is right for a missing
+    backup row and wrong for a missing instance: `instance --instance-id 9999` exited 0 with
+    database_count=0 and active_alerts=[] — "a box with no databases and no alerts" for a box
+    that does not exist (2026-09-15 eval, MA22: 30 of ids 1–230 answered this way). Any other
+    failure (403, 500, timeout) still degrades: the instance may well exist.
+    """
+    if _unavailable(detail) and detail.get("status_code") == 404:
+        _fail("not_found", f"instance {instance_id} does not exist on this platform", exit_code=1,
+              instance_id=instance_id)
+
+
 def cmd_instance(args: argparse.Namespace) -> Any:
     """Everything about one instance, from an id or an IP, in one call.
 
@@ -1817,6 +1831,7 @@ def cmd_instance(args: argparse.Namespace) -> Any:
                   exit_code=1, resolve_response=resolved)
 
     detail = _try_get(f"/instances/{instance_id}")
+    _fail_if_instance_missing(instance_id, detail)
     databases = _try_get("/databases", {"instance_id": instance_id, "limit": 1})
     alerts = _try_get("/alerts", {"instance_id": instance_id, "status": "active", "page_size": 50})
     alert_items, _ = _envelope(alerts)
@@ -1853,6 +1868,7 @@ def cmd_onboarding_check(args: argparse.Namespace) -> Any:
     """
     iid = args.instance_id
     detail = _try_get(f"/instances/{iid}")
+    _fail_if_instance_missing(iid, detail)
     databases = _try_get("/databases", {"instance_id": iid, "limit": 1})
     backups = _try_get(f"/instances/{iid}/backups")
     # Fleet-wide tables, shared across a fan-out rather than refetched per instance.

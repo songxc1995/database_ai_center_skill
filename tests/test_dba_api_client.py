@@ -2518,3 +2518,35 @@ def test_a_timeout_that_is_an_oserror_but_not_a_timeouterror_is_a_structured_err
     assert payload["error"] == "network_error"
     assert "timed out" in payload["message"]
 
+
+def _fake_try_get(missing_status):
+    def fake(path, params=None):
+        if path.startswith("/instances/9999") and "/backups" not in path:
+            return {"unavailable": True, "path": path, "status_code": missing_status}
+        return {"items": [], "total": 0}
+    return fake
+
+
+def test_an_instance_that_does_not_exist_is_not_found_not_an_empty_box(monkeypatch, capsys):
+    """MA22: `instance --instance-id 9999` exited 0 with database_count=0 and
+    active_alerts=[] — a nonexistent instance read as a real one with nothing on it."""
+    import json as _json
+
+    import pytest as _pytest
+
+    monkeypatch.setattr(client_module, "_try_get", _fake_try_get(404))
+    args = argparse.Namespace(instance_id=9999, ip=None, host=None)
+    with _pytest.raises(SystemExit) as exit_info:
+        client_module.cmd_instance(args)
+    assert exit_info.value.code == 1
+    payload = _json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["error"] == "not_found" and payload["instance_id"] == 9999
+
+
+def test_a_non_404_failure_on_the_instance_still_degrades(monkeypatch):
+    """A 500 or 403 does not say the instance is gone — the composite answer keeps its parts."""
+    monkeypatch.setattr(client_module, "_try_get", _fake_try_get(500))
+    args = argparse.Namespace(instance_id=9999, ip=None, host=None)
+    out = client_module.cmd_instance(args)
+    assert out["instance"]["unavailable"] is True and out["instance"]["status_code"] == 500
+\n

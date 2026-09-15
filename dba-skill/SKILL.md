@@ -547,7 +547,8 @@ worth a lot less when these disagree.
   platform really holds (`field` + `value`). Ask the user whether they meant one of them — never answer
   "does not exist" while `suggestions` is non-empty. An empty list means nothing close exists either.
 - `matched_on` (`3.81+`, per search row) names the fields `--q` matched: a row can be returned for its
-  business domain or contact, not its name. `null` means the search had no `--q`.
+  business domain or contact, not its name. Without `--q` it is `null` on `3.82+` (`[]` on 3.81 — which
+  means "no q", not "matched nothing").
 - `inactive_reason` / `inactive_since` / `inactive_detail` (`3.81+`, on instances): `vendor_absent` =
   the cloud provider no longer lists it; `disabled` = monitoring switched off by a person; `unknown` =
   nothing recorded. Quote the reason instead of guessing why an instance is inactive.
@@ -563,9 +564,10 @@ worth a lot less when these disagree.
   time when `effective_last_success_at` is null.
 - Directory (`3.82+`): `owned_database_count` per entry; `0` is a registered entry that owns nothing on
   record, not a sync error (the directory caches the upstream system; ownership is each database's own
-  metadata). Inventory coverage (`3.82+`) counts `instances_without_environment`,
-  `instances_with_inferred_role` and `databases_without_department`: a count grouped by those fields
-  covers only what was filled in — say how many were left out.
+  metadata). Inventory (`3.82+`): `coverage.instances_without_environment` and
+  `coverage.instances_with_inferred_role` (of `coverage.instances_in_scope`), and
+  `counts.databases_without_department` — a count grouped by those fields covers only what was filled
+  in; say how many were left out. The department gap overlaps `no_contact_databases` — never add them.
 - `created_at` on an instance is when the platform started managing it, not the resource's age.
 
 ## Output Guidance
