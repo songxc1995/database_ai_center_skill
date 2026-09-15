@@ -190,6 +190,7 @@ For live list questions:
 
 1. Use `directory-options --type contact` for “数据库联系人有哪些”, “联系人列表”, or “有哪些联系人”.
 2. Use `alerts --status active` for “现在有哪些告警”, “当前告警”, “active alerts”, or “告警列表”. (`alerts-list` is the older paginated UI endpoint and returns the raw evidence blob including internal `_dac_*` fields — reach for it only when you need a field `alerts` does not lift out.)
+   Reading the answer (Database AI Center `3.76+`): `counts.*` count **active** alerts within the filters whatever `--status` asks for; for “最近有没有 high 告警” read `by_severity` (every alert the filters matched, same scope as `total`). An active row's `recurrence` says whether it is the Nth time (`null` = not a recurring pattern) and `is_silenced` says a silence covers it right now.
 3. Do not answer live list questions from documentation, sample data, repository search, or direct local metadata database queries.
 
 For alert and diagnosis questions:
@@ -299,6 +300,7 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 2. Use `kb-incidents --root-cause-key <key>` to open the raw incidents behind a returned entry (each links to a real past alert/diagnosis).
 3. Use `kb-doc-search --q "<topic>"` to retrieve curated ops-runbook passages (handling steps, SOPs) relevant to the issue.
 4. Treat knowledge-base hits as **prior evidence and references**, not ground truth: weigh them against the current live evidence, and say when your conclusion matches a past confirmed root cause. These endpoints are read-only and return an empty result (`available:false`) when the knowledge corpus is not enabled — degrade quietly, never block the answer.
+5. Read each hit's `relevance` and `strength` (`3.76+`; older servers return every hit unfiltered, so treat a low `relevance` there with the same care). Matches below the relevance floor are dropped, and when none remains `warning` says nothing similar is on record — that is an answer ("no past incident like this"), not a failure. `strength: weak` (similarity below 0.60) means real matches and unrelated ones score alike in that band: **verify each against the live evidence** — never discard it as unrelated, and never present it as the confirmed cause.
 
 ### Analysis core group vs. the long tail
 The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classification`,
