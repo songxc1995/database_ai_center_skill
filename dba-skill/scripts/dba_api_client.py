@@ -2112,15 +2112,23 @@ def cmd_topology(args: argparse.Namespace) -> Any:
     }
     if focus is not None and not rows:
         # 空结果要说清是哪一种空。
-        cluster_id = (nodes.get(focus) or {}).get("cluster_id")
+        focus_node = nodes.get(focus) or {}
+        cluster_id = focus_node.get("cluster_id")
         if cluster_id is not None:
-            # 它在集群里:成员与角色的答案就在集群那边,别把人引到"查不到主备"。
-            # 生产 MGR 19 号集群:/clusters/19/members 主从齐全,拓扑 0 条边(平台 3.80 之前
-            # 组复制不画边),而原来这里只会说"两种含义、不要据此断言"。
+            # 它在集群里:成员与角色在集群那边,别把人引到"查不到主备"。但没有边的**原因**因集群
+            # 类型而异,套错了会让 agent 把原因说错(复查:MGR 那句一度被套到 RAC、DG 备库上)。
+            role = str(focus_node.get("role_detail") or focus_node.get("instance_role") or "").lower()
+            if any(t in role for t in ("standby", "replica")) and not role.startswith("mgr_"):
+                why = "它和主库之间的复制关系没有上报到拓扑(拓扑只画各实例自己上报的主从信息)。"
+            elif role.startswith("mgr_"):
+                why = "MGR 组复制在平台 3.80 之前不画边。"
+            elif focus_node.get("is_rac"):
+                why = "RAC 节点共享同一个库,节点之间本来就没有复制边。"
+            else:
+                why = "它的主从关系没有上报到拓扑(拓扑只画各实例自己上报的主从信息)。"
             out["note"] = (
-                "实例 %s 在拓扑里没有复制边,但它属于集群 %s —— 成员与角色(谁是主、谁是从)"
-                "看 get /clusters/%s/members,那里是完整答案。拓扑只画各实例上报的主从关系,"
-                "MGR 组复制在平台 3.80 之前不画边。" % (focus, cluster_id, cluster_id)
+                "实例 %s 在拓扑里没有复制边,但它属于集群 %s:%s成员与角色见 get /clusters/%s/members;"
+                "复制链上若还有未纳管的主机,那里也看不到。" % (focus, cluster_id, why, cluster_id)
             )
             out["cluster_id"] = cluster_id
         else:

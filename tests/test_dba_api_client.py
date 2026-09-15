@@ -1750,6 +1750,29 @@ class TopologyAndSeriesHelperTest(unittest.TestCase):
         self.assertIn("/clusters/19/members", out["note"])
         self.assertEqual(out["cluster_id"], 19)
         self.assertNotIn("不要据此断言", out["note"], "有集群可查时不该把人引到'查不到'")
+        self.assertIn("MGR", out["note"])
+        self.assertNotIn("完整答案", out["note"], "复制链上有外部主机时 /clusters 也残缺,不能说完整")
+
+    def test_the_no_edge_reason_follows_the_cluster_type(self):
+        """复查:MGR 那句"3.80 之前不画组复制边"一度被套到 RAC 节点和 DG 备库上 —— 原因说错了。
+        RAC 节点之间本来就没有复制边;DG 备库没边是它和主库的关系没上报。"""
+        from unittest import mock
+
+        def note_for(node):
+            payload = {"nodes": [dict({"id": 7, "name": "n", "external": False, "cluster_id": 13}, **node)],
+                       "edges": []}
+            args = argparse.Namespace(instance_id=7, ip=None, host=None, external_only=False)
+            with mock.patch.object(client_module, "_request", return_value=payload):
+                return client_module.cmd_topology(args)["note"]
+
+        rac = note_for({"role_detail": "rac_node", "is_rac": True})
+        self.assertIn("RAC", rac)
+        self.assertNotIn("MGR", rac)
+        dg = note_for({"role_detail": "physical_standby", "is_rac": True})
+        self.assertIn("没有上报", dg, "DG 备库没边的原因是关系没上报,不是 RAC")
+        self.assertNotIn("MGR", dg)
+        for text in (rac, dg):
+            self.assertIn("/clusters/13/members", text)
 
     def test_a_422_from_the_series_endpoint_is_the_answer_not_a_failure(self):
         """★ 平台用 422 说明「这个指标没有该粒度的汇总,所以这个窗口什么都给不出」——
