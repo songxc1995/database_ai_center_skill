@@ -2494,3 +2494,27 @@ def test_a_connection_that_breaks_mid_response_is_a_structured_error(monkeypatch
     payload = _json.loads(capsys.readouterr().err.strip().splitlines()[-1])
     assert payload["error"] == "network_error"
     assert "RemoteDisconnected" in payload["message"]
+
+
+def test_a_timeout_that_is_an_oserror_but_not_a_timeouterror_is_a_structured_error(monkeypatch, capsys):
+    """On Python 3.9 socket.timeout is an OSError but not a TimeoutError, and a timeout while
+    reading the status line escapes urllib's URLError wrapping. The skill host runs 3.9."""
+    import json as _json
+
+    import pytest as _pytest
+
+    class _Py39SocketTimeout(OSError):  # what socket.timeout is on 3.9
+        pass
+
+    def _slow(*_a, **_k):
+        raise _Py39SocketTimeout("timed out")
+
+    monkeypatch.setattr(client_module, "_base_url", lambda: "http://example.invalid/api/v2")
+    monkeypatch.setattr(client_module, "_api_key", lambda: "k")
+    monkeypatch.setattr(client_module.urllib.request, "urlopen", _slow)
+    with _pytest.raises(SystemExit):
+        client_module._http_call("GET", "/clusters")
+    payload = _json.loads(capsys.readouterr().err.strip().splitlines()[-1])
+    assert payload["error"] == "network_error"
+    assert "timed out" in payload["message"]
+

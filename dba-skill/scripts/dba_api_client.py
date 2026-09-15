@@ -1411,6 +1411,11 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
         # outside urllib's URLError wrapping, and read() can end short (IncompleteRead). Left
         # uncaught it surfaced as a raw traceback instead of an error the caller can read.
         _fail("network_error", f"{method} {path} failed mid-response: {type(exc).__name__}: {exc}")
+    except OSError as exc:
+        # socket.timeout on Python 3.9 is an OSError but NOT a TimeoutError (3.10+ aliases it),
+        # and a timeout while reading the status line escapes urllib's URLError wrapping — the
+        # skill host runs 3.9, and `get /clusters` right after a deploy ended in a raw traceback.
+        _fail("network_error", f"{method} {path} failed: {type(exc).__name__}: {exc}")
     except json.JSONDecodeError as exc:
         _fail("invalid_json", f"{method} {path} returned invalid JSON: {exc}")
 
