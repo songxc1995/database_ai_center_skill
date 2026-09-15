@@ -2120,7 +2120,7 @@ def cmd_topology(args: argparse.Namespace) -> Any:
             detail = str(focus_node.get("role_detail") or "").lower()
             coarse = str(focus_node.get("instance_role") or "").lower()
             # 两个字段都看:DG 备库常是 instance_role=physical_standby、role_detail=active_dg ——
-            # 只看 role_detail 会把它漏进通用分支(复查:inst63 就是这样)。
+            # 只看 role_detail 会把它漏进通用分支(复查时生产上的一台 DG 备库就是这样)。
             is_mirror = (not detail.startswith("mgr_")) and (
                 any(t in coarse for t in ("standby", "replica"))
                 or any(t in detail for t in ("standby", "replica", "dg"))

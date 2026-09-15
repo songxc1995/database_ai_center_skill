@@ -1769,7 +1769,7 @@ class TopologyAndSeriesHelperTest(unittest.TestCase):
         self.assertIn("RAC", rac)
         self.assertNotIn("MGR", rac)
         dg = note_for({"role_detail": "physical_standby", "is_rac": True})
-        # prod inst63: the DG role is in instance_role, role_detail says active_dg
+        # a prod DG standby: the DG role is in instance_role, role_detail says active_dg
         adg = note_for({"instance_role": "physical_standby", "role_detail": "active_dg", "is_rac": False})
         self.assertIn("和主库之间的复制关系没有上报", adg, "DG 备库漏进了通用分支")
         self.assertIn("没有上报", dg, "DG 备库没边的原因是关系没上报,不是 RAC")
