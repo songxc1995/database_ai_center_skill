@@ -295,14 +295,27 @@ no_matched_policy · transition=triggered · fallback_webhook=sent · policies_t
 ```
 
 - `fallback_webhook=sent` — the AI pipeline declined the alert (usually the alert-AI policy's
-  `severities` exclude it) but the plain webhook went out anyway. Nobody lost anything.
+  `severities` exclude it) and the plain broadcast went out instead. On `3.77.1+` it means at
+  least one webhook target actually took it. **Before 3.77.1 it was written whenever the fallback
+  ran** — including when every target's `min_severity` excluded the alert and nobody got it.
 - **`fallback_webhook=NOT sent` next to `outcome=skipped` is the shape that means nobody was
-  told.** That is the one to escalate.
+  told.** On `3.77.1+` that includes "every target's `min_severity` is above this alert" — a
+  configured outcome for a low alert, but still: nobody was told.
+- **The same alert with a row every 10–15 minutes (`transition=ongoing`, `sent` each time)** is
+  the re-send defect fixed in 3.77.1: it really did reach the group each time. On `3.77.1+` an
+  alert gets one such row per trigger.
+- The audit covers alerts routed through the AI queue. An alert sent straight to the webhook
+  leaves no per-alert row there — absence from `audit_trail` is not "nobody was told".
 
 Two traps in the same area:
 
 - **`_dac_notify_count` in an alert's evidence proves nothing.** It is written before routing
   is even attempted, so it does not mean delivered — it does not even mean attempted.
+- **`delivery_pending` on an `alerts` row is not "undelivered to a person".** It means the
+  hand-off to the AI queue has not been confirmed. Before 3.77.1 it stayed `true` on alerts the
+  fallback broadcast had already delivered (one was delivered 6 times while reading `true`), and
+  on resolved alerts forever. On `3.77.1+` only an active row can be `true`. Backup-class alerts
+  (`backup_*`) never retry, so an old marker on them stays until they resolve.
 - **Severity is gated by the alert-AI policy, not by config.** A policy whose `severities`
   omit `medium` means medium alerts get no AI analysis at all. Check `ai/policies` before
   concluding a rule is broken.
