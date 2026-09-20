@@ -1715,6 +1715,16 @@ def cmd_freshness(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_sweeps(args: argparse.Namespace) -> Any:
+    """Nightly database-discovery sweep runs (platform 3.83.0+).
+
+    Answers "why was this instance not discovered last night?" — a question that previously had
+    no answer anywhere: the sweep computed the skip reasons and threw them into a log line.
+    Each row carries the skipped distribution, which is the whole point of reading this.
+    """
+    return _request("GET", "/dba/database-discovery/sweeps", params={"limit": args.limit})
+
+
 def cmd_timeline(args: argparse.Namespace) -> Any:
     return _request(
         "GET",
@@ -3110,6 +3120,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     freshness.add_argument("--stale-after-hours", type=int)
     freshness.set_defaults(func=cmd_freshness)
+
+    sweeps = sub.add_parser(
+        "sweeps",
+        help="Nightly database-discovery sweep runs: what each one attempted, deferred and skipped (3.83.0+).",
+    )
+    sweeps.add_argument("--limit", type=int, help="Runs to return, newest first (server max 100).")
+    sweeps.set_defaults(func=cmd_sweeps)
 
     timeline = sub.add_parser("timeline")
     timeline.add_argument("--instance-id", type=int)

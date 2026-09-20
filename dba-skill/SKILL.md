@@ -200,6 +200,15 @@ For alert and diagnosis questions:
 3. Use `alert-evidence` for alert-specific evidence.
 4. Use `context` before producing DBA analysis.
 5. Use `freshness` before making confidence claims.
+6. **"Why was this instance not discovered?"** — `freshness` says the inventory is stale;
+   `sweeps` (3.83+) says what the nightly run actually did about it. Read the row's `skipped`
+   distribution: `cluster_covered_by_owner` (the cluster owner holds the inventory — not a gap),
+   `cluster_component` (a component sub-instance holds no databases), `recently_discovered`
+   (inside the refresh cycle), `recently_discovered_empty` (repeatedly found nothing, so it is
+   backed off — a monitoring-account privilege question, not a platform failure). An instance in
+   `deferred_over_budget` was due and simply did not fit this run; it goes first next time.
+   `attempted` equals `len(selected_instance_ids)` and `succeeded + failed + blocked` — if either
+   identity does not hold, say the record is inconsistent rather than reporting its numbers.
 6. Use `diagnostics-catalog` before any diagnostic run.
 7. Use `diagnostics-run` only with catalog `check_id` values.
 
@@ -306,7 +315,7 @@ For knowledge grounding (prior incidents + ops runbooks, Database AI Center `v2.
 ### Analysis core group vs. the long tail
 The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classification`,
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
-`directory-options`, `freshness`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
+`directory-options`, `freshness`, `sweeps`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
 `probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
 `cloud-rightsizing`, `cloud-savings-realized`, `cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
@@ -364,6 +373,7 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `directory-options` | `GET /dba/directory/options` |
 | `timeline` | `GET /dba/instances/{instance_id}/timeline` |
 | `freshness` | `GET /dba/instances/{instance_id}/freshness` |
+| `sweeps` | `GET /dba/database-discovery/sweeps` (3.83+) — why an instance was, or was not, swept |
 | `diagnostics-catalog` / `diagnostics-run` | `GET`/`POST /dba/instances/{instance_id}/diagnostics/...` |
 | `probe-catalog` / `probe-run` | `GET`/`POST /instances/{instance_id}/diagnostics/...` (live, rate-limited) |
 | `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
@@ -569,6 +579,30 @@ worth a lot less when these disagree.
   `counts.databases_without_department` — a count grouped by those fields covers only what was filled
   in; say how many were left out. The department gap overlaps `no_contact_databases` — never add them.
 - `created_at` on an instance is when the platform started managing it, not the resource's age.
+- **A `total` that is larger than the rows you got is not always truncation** (`3.84+`). On
+  `/ai/diagnoses` the rows are *folded*: repeat firings of the same (instance, rule) collapse into one
+  row that carries the group, so `items` below `total` is the normal shape — `truncated` is what says
+  rows were withheld. Report the thread count from `total`, and say the list is grouped.
+- **`main-chain` reports an assembled sample, not a census** (`3.87+`). `total` is how many events were
+  assembled across its eleven sources and does not move with `limit`; each source contributes at most
+  `per_source_cap` of its newest rows, `by_source` gives the split, and **`sources_at_cap` names the
+  sources that hit the cap — those have older events that were never assembled.** Never read `total` as
+  "this is everything that happened in the window"; if `sources_at_cap` is non-empty, say so.
+- **ELK log reads say when they are partial** (`3.87+`): `/elk/search` and the per-instance log view
+  carry `truncated`. `total` is Elasticsearch's hit count and **caps at 10000** when the index does not
+  track more — treat a flat `10000` as "at least", never as a log volume. `truncated=false` with a null
+  `total` means the count was unavailable, not that you saw everything (`available` / `note` say why).
+- **An empty `replication_status` now explains itself** (`3.85+`): the probe only answers *"am I
+  replicating from someone"*, never *"is anyone replicating from me"* — a primary feeding three replicas
+  returns zero rows too. Read the `note`: it distinguishes downstream replicas seen, binlog off (a
+  standalone), **cannot tell** (the account only sees its own sessions, or the instance is cloud-managed
+  and its vendor-run standby never appears in `PROCESSLIST`), and a cloud single-node class that has no
+  standby by design. Quote the note's distinction; never turn a zero-row result into "replication is
+  fine" or "the standby is gone".
+- **Cluster binding leaves a trace** (`3.84+`): after a member is attached, `cluster.extra.database_reclaim`
+  records whether the inventory was collapsed onto the owner (`status`, rows removed) or why it failed.
+  A member holding no database rows is normal — the owner holds them; check
+  `database_inventory_coverage` before calling it a discovery gap.
 
 ## Output Guidance
 For statistics or lookup questions, return:
