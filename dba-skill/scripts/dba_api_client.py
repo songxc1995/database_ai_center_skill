@@ -2913,11 +2913,13 @@ def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaul
     )
 
 
-def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
-    _add_global_output_flags(parser)
-    sub = parser.add_subparsers(dest="command", required=True)
+# 知识库按引擎过滤时的取值表。原本是 build_parser 里的局部量,夹在两个命令块之间 ——
+# 命令定义一旦按域拆开,跨块共享的局部量就会变成 NameError(2026-09-21 拆分时当场撞到)。
+_KB_DB_TYPES = ["oracle", "mysql", "postgres", "tidb", "clickhouse"]
 
+
+def _add_core_commands(sub) -> None:
+    """实例定位、目录与自检。"""
     instance = sub.add_parser(
         "instance",
         help="Everything about one instance from an id or an IP: detail, freshness, backups, "
@@ -2968,6 +2970,53 @@ def build_parser() -> argparse.ArgumentParser:
     context.add_argument("--stale-after-hours", type=int)
     context.set_defaults(func=cmd_context)
 
+    who = sub.add_parser(
+        "whoami",
+        help="Identity + expiry + rate limits + platform health — run this first when "
+             "something is not working",
+    )
+    who.set_defaults(func=cmd_whoami)
+
+    selfchk = sub.add_parser(
+        "self-check",
+        help="Platform cross-subsystem invariants — run before reporting anything as absent",
+    )
+    selfchk.add_argument("--violations-only", action="store_true",
+                         help="Return only the checks that are currently violated.")
+    selfchk.set_defaults(func=cmd_self_check)
+
+    classification = sub.add_parser("classification")
+    classification.add_argument("--limit", type=int)
+    classification.add_argument("--type", choices=["mysql", "postgres", "oracle", "tidb", "clickhouse"])
+    classification.add_argument(
+        "--topology",
+        help="Filter by topology kind: rac, dataguard, mysql_replication, mysql_group_replication, postgres_replication, tidb_cluster, clickhouse_cluster, replication, standalone",
+    )
+    classification.add_argument("--tenant-id")
+    classification.set_defaults(func=cmd_classification)
+
+    ai_endpoints = sub.add_parser(
+        "ai-endpoints",
+        help="List the self-describing catalog of model-reachable (ai-client) read endpoints.",
+    )
+    ai_endpoints.set_defaults(func=cmd_ai_endpoints)
+
+    get_cmd = sub.add_parser(
+        "get",
+        help="GET any model-reachable read path from the ai-endpoints catalog (drill-in).",
+    )
+    get_cmd.add_argument("path", help="Read path, e.g. /dashboard/trends or /api/v2/topology")
+    get_cmd.add_argument(
+        "--param",
+        action="append",
+        metavar="KEY=VALUE",
+        help="Query parameter (repeatable), e.g. --param hours=6",
+    )
+    get_cmd.set_defaults(func=cmd_get)
+
+
+def _add_alert_commands(sub) -> None:
+    """告警。"""
     alert_evidence = sub.add_parser("alert-evidence")
     alert_evidence.add_argument("--alert-id", type=int, required=True)
     alert_evidence.add_argument("--before-hours", type=int)
@@ -2990,58 +3039,6 @@ def build_parser() -> argparse.ArgumentParser:
     alerts_v2.add_argument("--limit", type=_positive_int, default=200)
     alerts_v2.set_defaults(func=cmd_alerts)
 
-    bcov = sub.add_parser(
-        "backups-coverage",
-        help="Fleet backup coverage, both tracks (v3.32+); defaults to at_risk only",
-    )
-    bcov.add_argument("--verdict", default="at_risk",
-                      choices=["at_risk", "ok", "warning", "indeterminate",
-                               "remote_untracked", "not_applicable", "suppressed", "all"])
-    bcov.add_argument("--instance-type")
-    bcov.add_argument("--exclude-cloud", action="store_true",
-                      help="Drop vendor-managed cloud RDS rows (their backups are the provider's).")
-    bcov.add_argument("--cloud-vendor")
-    bcov.add_argument("--environment")
-    bcov.add_argument("--limit", type=_positive_int, default=500)
-    bcov.set_defaults(func=cmd_backups_coverage)
-
-    who = sub.add_parser(
-        "whoami",
-        help="Identity + expiry + rate limits + platform health — run this first when "
-             "something is not working",
-    )
-    who.set_defaults(func=cmd_whoami)
-
-    selfchk = sub.add_parser(
-        "self-check",
-        help="Platform cross-subsystem invariants — run before reporting anything as absent",
-    )
-    selfchk.add_argument("--violations-only", action="store_true",
-                         help="Return only the checks that are currently violated.")
-    selfchk.set_defaults(func=cmd_self_check)
-
-    capf = sub.add_parser(
-        "capacity-forecast",
-        help="Projected exhaustion incl. trends below the alert threshold (v3.32+)",
-    )
-    capf.add_argument("--metric-name")
-    capf.add_argument("--max-days", type=float)
-    capf.add_argument("--include-gaps", action="store_true")
-    capf.add_argument("--limit", type=_positive_int, default=500)
-    capf.set_defaults(func=cmd_capacity_forecast)
-
-    silr = sub.add_parser(
-        "silence-report",
-        help="Why an instance might not be alerting: all 5 mechanisms (v3.32+)",
-    )
-    silr.add_argument("--instance-id", type=int)
-    silr.set_defaults(_needs_instance=True)
-    silr.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    silr.set_defaults(func=cmd_silence_report)
-
     alerts = sub.add_parser("alerts-list")
     alerts.add_argument("--status", default="active")
     alerts.add_argument("--all-statuses", action="store_true")
@@ -3060,16 +3057,55 @@ def build_parser() -> argparse.ArgumentParser:
     alerts.add_argument("--end-time")
     alerts.set_defaults(func=cmd_alerts_list)
 
-    classification = sub.add_parser("classification")
-    classification.add_argument("--limit", type=int)
-    classification.add_argument("--type", choices=["mysql", "postgres", "oracle", "tidb", "clickhouse"])
-    classification.add_argument(
-        "--topology",
-        help="Filter by topology kind: rac, dataguard, mysql_replication, mysql_group_replication, postgres_replication, tidb_cluster, clickhouse_cluster, replication, standalone",
+    silr = sub.add_parser(
+        "silence-report",
+        help="Why an instance might not be alerting: all 5 mechanisms (v3.32+)",
     )
-    classification.add_argument("--tenant-id")
-    classification.set_defaults(func=cmd_classification)
+    silr.add_argument("--instance-id", type=int)
+    silr.set_defaults(_needs_instance=True)
+    silr.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
+    silr.set_defaults(func=cmd_silence_report)
 
+
+def _add_backup_commands(sub) -> None:
+    """备份。"""
+    bcov = sub.add_parser(
+        "backups-coverage",
+        help="Fleet backup coverage, both tracks (v3.32+); defaults to at_risk only",
+    )
+    bcov.add_argument("--verdict", default="at_risk",
+                      choices=["at_risk", "ok", "warning", "indeterminate",
+                               "remote_untracked", "not_applicable", "suppressed", "all"])
+    bcov.add_argument("--instance-type")
+    bcov.add_argument("--exclude-cloud", action="store_true",
+                      help="Drop vendor-managed cloud RDS rows (their backups are the provider's).")
+    bcov.add_argument("--cloud-vendor")
+    bcov.add_argument("--environment")
+    bcov.add_argument("--limit", type=_positive_int, default=500)
+    bcov.set_defaults(func=cmd_backups_coverage)
+
+    backups = sub.add_parser(
+        "backups",
+        help="One instance's backup status + evidence-based determination (has-backup verdict; v2.98+)",
+    )
+    backups.add_argument("--instance-id", type=int)
+    backups.set_defaults(_needs_instance=True)
+    backups.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
+    backups.add_argument(
+        "--refresh", action="store_true",
+        help="Force a live Oracle RMAN refresh (slow); default serves the stored daily-swept status",
+    )
+    backups.set_defaults(func=cmd_backups)
+
+
+def _add_inventory_commands(sub) -> None:
+    """库存、负责人与库发现。"""
     inventory = sub.add_parser("inventory-summary")
     _common_filters(inventory)
     inventory.add_argument("--include-system-dbs", action="store_true")
@@ -3139,6 +3175,9 @@ def build_parser() -> argparse.ArgumentParser:
     timeline.add_argument("--limit", type=int)
     timeline.set_defaults(func=cmd_timeline)
 
+
+def _add_diagnostic_commands(sub) -> None:
+    """诊断探针与拓扑。"""
     catalog = sub.add_parser("diagnostics-catalog")
     catalog.add_argument("--instance-id", type=int)
     catalog.set_defaults(_needs_instance=True)
@@ -3160,25 +3199,6 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--database-name")
     run.add_argument("--sql", help=argparse.SUPPRESS)
     run.set_defaults(func=cmd_diagnostics_run)
-
-    ai_endpoints = sub.add_parser(
-        "ai-endpoints",
-        help="List the self-describing catalog of model-reachable (ai-client) read endpoints.",
-    )
-    ai_endpoints.set_defaults(func=cmd_ai_endpoints)
-
-    get_cmd = sub.add_parser(
-        "get",
-        help="GET any model-reachable read path from the ai-endpoints catalog (drill-in).",
-    )
-    get_cmd.add_argument("path", help="Read path, e.g. /dashboard/trends or /api/v2/topology")
-    get_cmd.add_argument(
-        "--param",
-        action="append",
-        metavar="KEY=VALUE",
-        help="Query parameter (repeatable), e.g. --param hours=6",
-    )
-    get_cmd.set_defaults(func=cmd_get)
 
     probe_catalog = sub.add_parser("probe-catalog")
     probe_catalog.add_argument("--instance-id", type=int)
@@ -3218,8 +3238,47 @@ def build_parser() -> argparse.ArgumentParser:
     prometheus_query.add_argument("--url", help="override Prometheus URL (defaults to saved extra.prometheus_url)")
     prometheus_query.set_defaults(func=cmd_prometheus_query)
 
-    _KB_DB_TYPES = ["oracle", "mysql", "postgres", "tidb", "clickhouse"]
+    topo = sub.add_parser(
+        "topology",
+        help="复制拓扑:谁复制给谁,**含未纳管的外部主机**(/clusters 给不出这部分)",
+    )
+    topo.add_argument("--instance-id", type=int, help="只看这台相关的边")
+    topo.add_argument("--ip")
+    topo.add_argument("--host")
+    topo.add_argument("--external-only", action="store_true",
+                      help="只看一端是未纳管主机的边——那是 /clusters 完全看不见的部分。")
+    topo.set_defaults(func=cmd_topology)
 
+
+def _add_capacity_commands(sub) -> None:
+    """容量与指标。"""
+    capf = sub.add_parser(
+        "capacity-forecast",
+        help="Projected exhaustion incl. trends below the alert threshold (v3.32+)",
+    )
+    capf.add_argument("--metric-name")
+    capf.add_argument("--max-days", type=float)
+    capf.add_argument("--include-gaps", action="store_true")
+    capf.add_argument("--limit", type=_positive_int, default=500)
+    capf.set_defaults(func=cmd_capacity_forecast)
+
+    mseries = sub.add_parser(
+        "metric-series",
+        help="一个指标的走势(latest 只给一个点)。★ >24h 会切汇总表,云采集指标在那儿没有数据",
+    )
+    mseries.add_argument("--instance-id", type=int)
+    mseries.add_argument("--ip")
+    mseries.add_argument("--host")
+    mseries.add_argument("--metric-name", help="不传则返回全部指标——通常很大,建议指定")
+    mseries.add_argument("--hours", type=int, default=24,
+                         help="回看窗口,默认 24(★ 超过 24 会切到汇总表)")
+    mseries.add_argument("--granularity", choices=["auto", "raw", "minute", "hour", "day"],
+                         help="默认 auto:≤24h 用 raw,再往上依次 minute/hour/day")
+    mseries.set_defaults(func=cmd_metric_series)
+
+
+def _add_knowledge_commands(sub) -> None:
+    """知识库。"""
     kb_search = sub.add_parser(
         "kb-search", help="Knowledge base: DBA-confirmed symptom->root-cause->remediation history"
     )
@@ -3248,6 +3307,9 @@ def build_parser() -> argparse.ArgumentParser:
     kb_doc_search.add_argument("--limit", type=int)
     kb_doc_search.set_defaults(func=cmd_kb_doc_search)
 
+
+def _add_elk_commands(sub) -> None:
+    """日志(ELK)。"""
     elk_status = sub.add_parser(
         "elk-status", help="ELK connectivity + which DB-log indices exist (v2.24+)"
     )
@@ -3271,6 +3333,9 @@ def build_parser() -> argparse.ArgumentParser:
     elk_search.add_argument("--size", type=int, default=200, help="Max rows (1-1000)")
     elk_search.set_defaults(func=cmd_elk_search)
 
+
+def _add_cost_commands(sub) -> None:
+    """云成本。"""
     cloud_rightsizing = sub.add_parser(
         "cloud-rightsizing",
         help="Cloud RDS right-sizing readout: per-instance peaks, downsize candidates, cost + saving (v2.74+)",
@@ -3280,31 +3345,6 @@ def build_parser() -> argparse.ArgumentParser:
     cloud_rightsizing.add_argument("--mem-max", type=float, help="Memory-pressure impediment %% (default 70)")
     cloud_rightsizing.add_argument("--vendor", choices=["aliyun", "huawei"], help="Restrict to one provider")
     cloud_rightsizing.set_defaults(func=cmd_cloud_rightsizing)
-
-    topo = sub.add_parser(
-        "topology",
-        help="复制拓扑:谁复制给谁,**含未纳管的外部主机**(/clusters 给不出这部分)",
-    )
-    topo.add_argument("--instance-id", type=int, help="只看这台相关的边")
-    topo.add_argument("--ip")
-    topo.add_argument("--host")
-    topo.add_argument("--external-only", action="store_true",
-                      help="只看一端是未纳管主机的边——那是 /clusters 完全看不见的部分。")
-    topo.set_defaults(func=cmd_topology)
-
-    mseries = sub.add_parser(
-        "metric-series",
-        help="一个指标的走势(latest 只给一个点)。★ >24h 会切汇总表,云采集指标在那儿没有数据",
-    )
-    mseries.add_argument("--instance-id", type=int)
-    mseries.add_argument("--ip")
-    mseries.add_argument("--host")
-    mseries.add_argument("--metric-name", help="不传则返回全部指标——通常很大,建议指定")
-    mseries.add_argument("--hours", type=int, default=24,
-                         help="回看窗口,默认 24(★ 超过 24 会切到汇总表)")
-    mseries.add_argument("--granularity", choices=["auto", "raw", "minute", "hour", "day"],
-                         help="默认 auto:≤24h 用 raw,再往上依次 minute/hour/day")
-    mseries.set_defaults(func=cmd_metric_series)
 
     cloud_savings = sub.add_parser(
         "cloud-savings-realized",
@@ -3336,21 +3376,28 @@ def build_parser() -> argparse.ArgumentParser:
                                          "coupon-heavy years. Partial years are flagged.")
     cloud_cost_history.set_defaults(func=cmd_cloud_cost_history)
 
-    backups = sub.add_parser(
-        "backups",
-        help="One instance's backup status + evidence-based determination (has-backup verdict; v2.98+)",
-    )
-    backups.add_argument("--instance-id", type=int)
-    backups.set_defaults(_needs_instance=True)
-    backups.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    backups.add_argument(
-        "--refresh", action="store_true",
-        help="Force a live Oracle RMAN refresh (slow); default serves the stored daily-swept status",
-    )
-    backups.set_defaults(func=cmd_backups)
+
+def build_parser() -> argparse.ArgumentParser:
+    """命令定义按域分在 _add_*_commands 里。
+
+    这个函数原本 443 行,是全文件唯一**随时间必然变长**的地方(每加一个命令就长一点)。
+    ★ 等价性不是靠读代码保证的:重构前后 41 份 `--help` 输出做过逐字比对。
+    ★ 拆分时当场撞到一个坑:命令块之间夹着共享的局部量(_KB_DB_TYPES),按域拆开后它变成
+      NameError —— 已提为模块级常量。再有这类共享量,也要先提上去再拆。
+    """
+    parser = argparse.ArgumentParser(description="Call Database AI Center DBA APIs safely.")
+    _add_global_output_flags(parser)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    _add_core_commands(sub)
+    _add_alert_commands(sub)
+    _add_backup_commands(sub)
+    _add_inventory_commands(sub)
+    _add_diagnostic_commands(sub)
+    _add_capacity_commands(sub)
+    _add_knowledge_commands(sub)
+    _add_elk_commands(sub)
+    _add_cost_commands(sub)
 
     # Accept the flags after the subcommand too — `inventory-summary --all` is what anyone
     # types first, and argparse would otherwise only honour them before the subcommand.
