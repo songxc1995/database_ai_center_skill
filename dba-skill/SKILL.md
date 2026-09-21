@@ -643,3 +643,12 @@ Include caveats when evidence is stale, diagnostics are skipped, host evidence i
 - If `context` or `alert-evidence` fails, return whatever earlier evidence is available and mark the result degraded.
 - If freshness is stale, lower confidence and include the stale evidence labels.
 - If `diagnostics-run` is not authorized or a check is skipped, keep the analysis and report the skipped check separately.
+- **A field you expected is not there? Two checks, in this order** (`3.88+`).
+  **First confirm the request itself succeeded** — an error body has a different shape, and reading
+  it as "the platform has no such field" is reading the wrong object. Then ask `ai-endpoints` for
+  that path's `response_fields` (top-level names, derived from the route, so they cannot drift).
+  **A field that is absent and a field that is empty are not the same thing**, and `.get()` collapses
+  both into `None`: use `"key" in obj`. Real case: `main-chain` puts its rows in `timeline`, not
+  `items` — a caller read `.get("items")`, got `None`, and reported "0 rows" next to `total: 855`
+  without stopping at the contradiction. **Two numbers that cannot both be true are a signal to
+  doubt your own reading first.**
