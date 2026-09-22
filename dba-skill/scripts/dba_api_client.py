@@ -2474,6 +2474,20 @@ def cmd_cloud_rightsizing(args: argparse.Namespace) -> Any:
     )
 
 
+def cmd_cloud_monitoring_coverage(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/dba/cloud-rds/monitoring-coverage",
+        params={
+            "vendor": args.vendor,
+            "coverage": "missing" if args.missing_only else args.coverage,
+            "tenant_id": args.tenant_id,
+            "limit": args.limit,
+            "offset": args.offset,
+        },
+    )
+
+
 def cmd_cloud_savings_realized(args: argparse.Namespace) -> Any:
     """What was actually DONE about cost, not what could be.
 
@@ -3336,6 +3350,23 @@ def _add_elk_commands(sub) -> None:
 
 def _add_cost_commands(sub) -> None:
     """云成本。"""
+    cloud_monitoring = sub.add_parser(
+        "cloud-monitoring-coverage",
+        help="Which cloud RDS instances have DB-connection deep monitoring, and which do not",
+    )
+    cloud_monitoring.add_argument("--vendor", choices=["aliyun", "huawei"], default="aliyun")
+    mode = cloud_monitoring.add_mutually_exclusive_group()
+    mode.add_argument("--coverage", choices=["all", "enabled", "missing"], default="all")
+    mode.add_argument(
+        "--missing-only",
+        action="store_true",
+        help="Only instances without deep monitoring (shortcut for --coverage missing)",
+    )
+    cloud_monitoring.add_argument("--tenant-id")
+    cloud_monitoring.add_argument("--limit", type=_positive_int, default=2000)
+    cloud_monitoring.add_argument("--offset", type=int)
+    cloud_monitoring.set_defaults(func=cmd_cloud_monitoring_coverage)
+
     cloud_rightsizing = sub.add_parser(
         "cloud-rightsizing",
         help="Cloud RDS right-sizing readout: per-instance peaks, downsize candidates, cost + saving (v2.74+)",

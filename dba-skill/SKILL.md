@@ -165,6 +165,7 @@ python scripts/dba_api_client.py elk-status
 python scripts/dba_api_client.py elk-coverage
 python scripts/dba_api_client.py elk-search --host-ip <db-host-ip> --levels ERROR,FATAL --start 2026-07-30T00:00:00Z --size 50
 python scripts/dba_api_client.py cloud-rightsizing --window-days 30 --vendor huawei
+python scripts/dba_api_client.py cloud-monitoring-coverage --vendor aliyun --missing-only --all
 python scripts/dba_api_client.py cloud-cost-history
 python scripts/dba_api_client.py backups --instance-id 12
 ```
@@ -185,6 +186,7 @@ For asset, ownership, and governance questions:
    64 unused databases" misattributes a human judgement to the platform, and the implied
    "the other 1,300 are in use" is false.
 6. Use `classification` for “哪些实例是 RAC / Data Guard / 单实例 / 主从”, “哪些是云 RDS”, and “哪些实例有备份” (topology + cloud + backup inventory).
+7. Use `cloud-monitoring-coverage --vendor aliyun --missing-only --all` for “哪些阿里云实例没有深度监控”. `cloud_only` still has vendor metrics but no live database connection; `misconfigured` was promoted to deep collection without complete credentials.
 
 For live list questions:
 
@@ -317,7 +319,8 @@ The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classific
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
 `directory-options`, `freshness`, `sweeps`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
 `probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
-`cloud-rightsizing`, `cloud-savings-realized`, `cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
+`cloud-monitoring-coverage`, `cloud-rightsizing`, `cloud-savings-realized`,
+`cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
 questions without needing to discover anything.
 
@@ -366,6 +369,7 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `backups` | `GET /instances/{instance_id}/backups` |
 | `backups-coverage` | `GET /dba/backups/coverage` |
 | `classification` | `GET /instances/classification` |
+| `cloud-monitoring-coverage` | `GET /dba/cloud-rds/monitoring-coverage` — cloud-only vs DB-connection deep monitoring |
 | `inventory-summary` | `GET /dba/inventory/summary` |
 | `databases-search` | `GET /dba/databases/search` |
 | `databases-unused` | `GET /dba/databases/unused` |

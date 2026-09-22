@@ -158,6 +158,22 @@ assembled from rows that exist:
 Never answer "only 3 instances have a problem" from `items` alone. Read coverage first: three
 hits out of 155 measured is a different statement from three out of 20.
 
+## Cloud metrics are not deep monitoring
+
+Use `cloud-monitoring-coverage --vendor aliyun --missing-only --all` for “哪些阿里云实例没有
+深度监控”. The endpoint scopes to active cloud RDS rows and makes the distinction explicit:
+
+- `deep`: the instance is in the database-connection collection loop and carries complete
+  monitoring credentials. Live SQL probes can be attempted.
+- `cloud_only`: vendor control-plane metrics still flow, but the row is `agentless`; the
+  platform cannot connect to the database or run live SQL diagnostics.
+- `misconfigured`: the row was marked for deep collection but its username/password fields
+  are incomplete. Treat this as a configuration defect, not as cloud-only coverage.
+
+Read `counts` for the complete active vendor scope. `total` and `items` apply the requested
+`coverage` filter; `limit`/`offset` plus `truncated` make completeness explicit. The returned
+`remediation` names the write endpoint, but the DBA skill is read-oriented and does not call it.
+
 ## Inventory counts are about databases, not instances
 
 `inventory-summary`'s `total_instances` counts instances **appearing in the matched database
