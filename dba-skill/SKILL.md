@@ -1,12 +1,12 @@
 ---
 name: dba-skill
-description: Live read-only DBA facts and analysis from Database AI Center — alerts, backups, ownership and contacts, inventory, table-structure business inference, cloud RDS cost, ELK logs, the knowledge base, and allowlisted live diagnostics against the database itself. Use when a question needs current data about the database estate rather than a guess; the server's own catalogues (ai-endpoints, probe-catalog) say what this particular deployment can do.
+description: DBA facts and analysis from Database AI Center — alerts, backups, ownership, inventory, persisted database-object metadata and business-inference evidence, cloud RDS cost, ELK logs, the knowledge base, and allowlisted live diagnostics. Use when a question needs current database-estate evidence rather than a guess; normal metadata queries read platform snapshots and never touch source databases.
 ---
 
 # DBA Skill
 
 ## Overview
-Use this skill as the primary read-only DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes).
+Use this skill as the primary read-oriented DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes). The sole metadata mutation exposed here is the explicit, admin-only `refresh-database-metadata` queue action; it remains subject to server-side load, time, concurrency and object-count limits.
 
 Version numbers written into this document are minimums, not a description of what is deployed —
 they will drift, and chasing them here is how a document starts lying. `get
@@ -153,7 +153,12 @@ python scripts/dba_api_client.py probe-catalog --instance-id 12
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
-python scripts/dba_api_client.py business-inference-evidence --instance-id 12 --database ecology
+python scripts/dba_api_client.py metadata-coverage
+python scripts/dba_api_client.py database-objects --database-id 41 --all
+python scripts/dba_api_client.py search-database-objects --name order --match prefix --all
+python scripts/dba_api_client.py business-inference-evidence --database-id 41
+python scripts/dba_api_client.py refresh-database-metadata --database-id 41  # admin only
+python scripts/dba_api_client.py metadata-refresh-status --run-id 9
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe full_join_statements
 python scripts/dba_api_client.py prometheus-query --instance-id 8 --query 'count(pd_hotspot_status{type="hot_write_region_as_leader"} > 0)'
 python scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
@@ -188,7 +193,8 @@ For asset, ownership, and governance questions:
    "the other 1,300 are in use" is false.
 6. Use `classification` for “哪些实例是 RAC / Data Guard / 单实例 / 主从”, “哪些是云 RDS”, and “哪些实例有备份” (topology + cloud + backup inventory).
 7. Use `cloud-monitoring-coverage --vendor aliyun --missing-only --all` for “哪些阿里云实例没有深度监控”. `cloud_only` still has vendor metrics but no live database connection; `misconfigured` was promoted to deep collection without complete credentials.
-8. Use `business-inference-evidence --instance-id N --database NAME` when asked what business a database probably serves. Then read [references/business_inference.md](references/business_inference.md) and perform the inference yourself; the command deliberately returns evidence, not a fabricated business label.
+8. Use `business-inference-evidence --database-id N` when asked what business a database probably serves. It reads the persisted snapshot only. Then read [references/business_inference.md](references/business_inference.md) and perform the inference yourself; the command deliberately returns evidence, not a fabricated business label.
+9. For object inventory, cross-fleet name search, change history, coverage, or explicit refresh, read [references/metadata_directory.md](references/metadata_directory.md). Ordinary reads never connect to source databases.
 
 For live list questions:
 
@@ -242,7 +248,7 @@ For database logs (Database AI Center `v2.24+`), use `elk-status` (are the ELK i
 
 ### Inferring a database's likely business
 
-Use `business-inference-evidence` rather than assembling a prompt from instance detail or ownership metadata. It makes one existing, read-only `table_inventory` probe call and returns only the database name, engine, table names/comments, evidence quality, and limitations. It does not read table rows, sizes, SQL text, contacts, instance names, or the stored `service_domain`, and it never writes a conclusion back.
+Use `business-inference-evidence` rather than assembling a prompt from instance detail or ownership metadata. It reads every page of the platform's persisted object snapshot and returns only object names/types/comments, snapshot quality, age, and limitations. It never opens a source-database connection, reads table rows, sizes or SQL text, includes ownership labels, or writes a conclusion back.
 
 Read [references/business_inference.md](references/business_inference.md) before drawing the conclusion. Its confidence ceiling is a hard maximum, not a suggested rating. `unavailable` or `insufficient` means stop and say why; a truncated alphabetical prefix or a commentless sample must lower confidence, and generic technical tables are not evidence of a business domain.
 
@@ -388,7 +394,11 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `sweeps` | `GET /dba/database-discovery/sweeps` (3.83+) — why an instance was, or was not, swept |
 | `diagnostics-catalog` / `diagnostics-run` | `GET`/`POST /dba/instances/{instance_id}/diagnostics/...` |
 | `probe-catalog` / `probe-run` | `GET`/`POST /instances/{instance_id}/diagnostics/...` (live, rate-limited) |
-| `business-inference-evidence` | `POST /instances/{instance_id}/diagnostics/probe` with fixed `table_inventory` — model-safe business inference evidence |
+| `metadata-coverage` | `GET /dba/metadata/coverage` — snapshot coverage/freshness, safe for viewer |
+| `database-objects` / `database-object-changes` | `GET /dba/metadata/databases/{database_id}/{objects,changes}` — persisted directory, no source connection |
+| `search-database-objects` | `GET /dba/metadata/objects/search` — exact/prefix cross-fleet object search |
+| `business-inference-evidence` | `GET /dba/metadata/databases/{database_id}/objects` — model-safe evidence from the persisted snapshot |
+| `refresh-database-metadata` / `metadata-refresh-status` | `POST .../refresh` (admin-only bounded queue) / `GET .../refresh-runs/{run_id}` |
 | `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
 | `kb-search` / `kb-incidents` / `kb-doc-search` | `GET /knowledge/...` |
 | `elk-status` / `elk-coverage` / `elk-search` | `GET /elk/...` |
@@ -547,7 +557,7 @@ worth a lot less when these disagree.
 - Do not read or print `.env` directly. Use the helper so secrets stay out of chat logs.
 - Do not place API keys in shell commands. Rely on the helper's nearest `.env` loading, environment variables, or an external secret manager wrapper.
 - Do not run free-form SQL. Diagnostics come from `diagnostics-catalog` (DBA checks) or whitelisted probe names via `probe-catalog` / `probe-run` (`--sql-id` / `--session-id` / `--object-name` params only — never a SQL string).
-- Do not mutate Database AI Center data; this skill is read-oriented except for allowlisted diagnostic execution.
+- Do not mutate Database AI Center data except when the user explicitly requests a metadata refresh and the active key is `admin`; then only `refresh-database-metadata` may be used. It queues the server's bounded collector and cannot accept SQL or bypass safety gates. Allowlisted diagnostic POSTs execute reads and remain non-mutating.
 - Keep final analysis in Chinese unless the user asks otherwise.
 - Treat Zabbix as supporting evidence only, not a replacement for Database AI Center evidence.
 

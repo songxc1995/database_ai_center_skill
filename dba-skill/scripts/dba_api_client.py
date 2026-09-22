@@ -2397,16 +2397,56 @@ def cmd_probe_run(args: argparse.Namespace) -> Any:
 
 
 def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
-    payload = _request(
-        "POST",
-        f"/instances/{args.instance_id}/diagnostics/probe",
-        body={"probe": "table_inventory", "params": {"object_name": args.database}},
-    )
-    rows = payload.get("rows") if isinstance(payload, dict) else None
+    database_id = getattr(args, "database_id", None)
+    database_name = getattr(args, "database", None)
+    instance_id = getattr(args, "instance_id", None)
+    if database_id is None:
+        if instance_id is None or not database_name:
+            _fail(
+                "missing_database",
+                "business-inference-evidence needs --database-id N, or both --instance-id N and --database NAME",
+                exit_code=2,
+            )
+        matches = _request(
+            "GET",
+            "/dba/databases/search",
+            params={
+                "q": database_name,
+                "instance_id": instance_id,
+                "status": "active",
+                "include_system_dbs": False,
+                "limit": 100,
+                "offset": 0,
+            },
+        )
+        candidates = matches.get("items") if isinstance(matches, dict) else None
+        exact = [
+            row for row in (candidates if isinstance(candidates, list) else [])
+            if isinstance(row, dict)
+            and str(row.get("database_name") or "").lower() == str(database_name).lower()
+            and int(row.get("instance_id") or -1) == int(instance_id)
+        ]
+        if len(exact) != 1:
+            _fail(
+                "database_not_uniquely_resolved",
+                "The instance/database pair did not resolve to exactly one active, non-system database; use --database-id.",
+                exit_code=2,
+            )
+        database_id = int(exact[0]["database_id"])
+
+    # This command intentionally bypasses the live-probe API. It reads the platform snapshot
+    # and follows every page so an external model gets the stored catalogue, not an arbitrary
+    # alphabetical first page. No request made here can connect to the source database.
+    path = f"/dba/metadata/databases/{database_id}/objects"
+    payload = _fetch_all("GET", path, {"limit": 500, "offset": 0})
+    _warn_if_truncated(payload, path)
+    rows = payload.get("items") if isinstance(payload, dict) else None
     items = [
         {
-            "table_name": row.get("table_name"),
-            "table_comment": row.get("table_comment"),
+            "schema_name": row.get("schema_name"),
+            "table_name": row.get("object_name"),
+            "object_type": row.get("object_type"),
+            "table_comment": row.get("object_comment"),
         }
         for row in (rows if isinstance(rows, list) else [])
         if isinstance(row, dict)
@@ -2414,28 +2454,32 @@ def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
     tables_with_comments = sum(
         1 for row in items if str(row.get("table_comment") or "").strip()
     )
-    available = bool(payload.get("available")) if isinstance(payload, dict) else False
-    truncated = bool(payload.get("truncated")) if isinstance(payload, dict) else False
+    status_value = str(payload.get("status") or "never_collected") if isinstance(payload, dict) else "never_collected"
+    completeness = payload.get("completeness") if isinstance(payload, dict) else None
+    available = status_value not in {"never_collected", "failed", "archived"}
+    partial = completeness == "partial" or status_value == "partial" or bool(
+        payload.get("truncated") if isinstance(payload, dict) else False
+    )
     limitations: list[dict[str, str]] = []
     if not available:
         limitations.append({
-            "code": "probe_unavailable",
-            "message": "The table inventory probe is unavailable; do not infer a business from this response.",
+            "code": "snapshot_unavailable",
+            "message": "No usable persisted metadata snapshot exists; do not infer a business from this response.",
         })
     elif not items:
         limitations.append({
-            "code": "empty_table_inventory",
+            "code": "empty_metadata_snapshot",
             "message": (
-                "The probe succeeded but returned no tables. This is insufficient evidence, not proof that "
+                "The stored snapshot contains no objects. This is insufficient evidence, not proof that "
                 "the database has no business purpose; carry the probe note and do not infer."
             ),
         })
-    elif truncated:
+    elif partial:
         limitations.append({
-            "code": "truncated_alphabetical_prefix",
+            "code": "partial_snapshot",
             "message": (
-                "The probe returned only the alphabetically first table names up to its row limit; "
-                "unseen tables may carry different business signals."
+                "The latest collection was incomplete or this response could not retrieve every stored page; "
+                "missing objects may carry different business signals."
             ),
         })
     if available and items and tables_with_comments == 0:
@@ -2448,25 +2492,71 @@ def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
         })
     return {
         "task": "infer_database_business",
-        "instance_id": args.instance_id,
-        "database_name": args.database,
-        "db_type": payload.get("db_type") if isinstance(payload, dict) else None,
+        "database_id": database_id,
+        "instance_id": instance_id,
+        "database_name": database_name,
         "available": available,
         "evidence_status": "unavailable" if not available else ("ready" if items else "insufficient"),
+        "snapshot_status": status_value,
+        "completeness": completeness,
+        "collected_at": payload.get("collected_at") if isinstance(payload, dict) else None,
         "signal_quality": {
             "tables_returned": len(items),
             "tables_with_comments": tables_with_comments,
             "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
-            "sample_scope": "alphabetical_prefix" if truncated else "complete",
-            "confidence_ceiling": "medium" if truncated else ("high" if items else "none"),
+            "sample_scope": "partial_snapshot" if partial else "complete",
+            "confidence_ceiling": "medium" if partial else ("high" if items else "none"),
         },
-        "row_limit": payload.get("row_limit") if isinstance(payload, dict) else None,
         "total": payload.get("total") if isinstance(payload, dict) else None,
-        "truncated": truncated,
-        "note": payload.get("note") if isinstance(payload, dict) else None,
+        "truncated": bool(payload.get("truncated")) if isinstance(payload, dict) else False,
+        "provenance": "persisted_metadata_directory",
         "limitations": limitations,
         "items": items,
     }
+
+
+def cmd_metadata_coverage(args: argparse.Namespace) -> Any:
+    _ = args
+    return _request("GET", "/dba/metadata/coverage")
+
+
+def cmd_database_objects(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        f"/dba/metadata/databases/{args.database_id}/objects",
+        params={"limit": args.limit, "offset": args.offset},
+    )
+
+
+def cmd_database_object_changes(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        f"/dba/metadata/databases/{args.database_id}/changes",
+        params={"limit": args.limit, "offset": args.offset},
+    )
+
+
+def cmd_search_database_objects(args: argparse.Namespace) -> Any:
+    return _request(
+        "GET",
+        "/dba/metadata/objects/search",
+        params={
+            "name": args.name,
+            "match": args.match,
+            "instance_type": args.instance_type,
+            "object_type": args.object_type,
+            "limit": args.limit,
+            "offset": args.offset,
+        },
+    )
+
+
+def cmd_refresh_database_metadata(args: argparse.Namespace) -> Any:
+    return _request("POST", f"/dba/metadata/databases/{args.database_id}/refresh")
+
+
+def cmd_metadata_refresh_status(args: argparse.Namespace) -> Any:
+    return _request("GET", f"/dba/metadata/refresh-runs/{args.run_id}")
 
 
 def cmd_prometheus_query(args: argparse.Namespace) -> Any:
@@ -3312,12 +3402,62 @@ def _add_diagnostic_commands(sub) -> None:
 
     business_inference = sub.add_parser(
         "business-inference-evidence",
-        help="Read-only table-name/comment evidence for a model to infer a database's likely business",
+        help="Read persisted object-name/comment evidence for a model to infer a database's likely business",
     )
+    business_inference.add_argument("--database-id", type=int)
     business_inference.add_argument("--instance-id", type=int)
-    business_inference.set_defaults(_needs_instance=True)
-    business_inference.add_argument("--database", required=True)
+    business_inference.add_argument("--database")
     business_inference.set_defaults(func=cmd_business_inference_evidence)
+
+    metadata_coverage = sub.add_parser(
+        "metadata-coverage",
+        help="Coverage and freshness of the persisted database-object directory",
+    )
+    metadata_coverage.set_defaults(func=cmd_metadata_coverage)
+
+    database_objects = sub.add_parser(
+        "database-objects",
+        help="Read one database's persisted object snapshot; never connects to the source database",
+    )
+    database_objects.add_argument("--database-id", type=int, required=True)
+    database_objects.add_argument("--limit", type=int, default=100)
+    database_objects.add_argument("--offset", type=int, default=0)
+    database_objects.set_defaults(func=cmd_database_objects)
+
+    database_changes = sub.add_parser(
+        "database-object-changes",
+        help="Read recent persisted object additions, removals and definition/comment changes",
+    )
+    database_changes.add_argument("--database-id", type=int, required=True)
+    database_changes.add_argument("--limit", type=int, default=100)
+    database_changes.add_argument("--offset", type=int, default=0)
+    database_changes.set_defaults(func=cmd_database_object_changes)
+
+    search_objects = sub.add_parser(
+        "search-database-objects",
+        help="Search persisted object names across active, non-system databases",
+    )
+    search_objects.add_argument("--name", required=True)
+    search_objects.add_argument("--match", choices=["exact", "prefix"], default="exact")
+    search_objects.add_argument("--instance-type")
+    search_objects.add_argument("--object-type")
+    search_objects.add_argument("--limit", type=int, default=100)
+    search_objects.add_argument("--offset", type=int, default=0)
+    search_objects.set_defaults(func=cmd_search_database_objects)
+
+    refresh_metadata = sub.add_parser(
+        "refresh-database-metadata",
+        help="Admin-only: queue one bounded, load-gated metadata refresh",
+    )
+    refresh_metadata.add_argument("--database-id", type=int, required=True)
+    refresh_metadata.set_defaults(func=cmd_refresh_database_metadata)
+
+    refresh_status = sub.add_parser(
+        "metadata-refresh-status",
+        help="Read the status and completeness of one queued metadata refresh",
+    )
+    refresh_status.add_argument("--run-id", type=int, required=True)
+    refresh_status.set_defaults(func=cmd_metadata_refresh_status)
 
     prometheus_query = sub.add_parser(
         "prometheus-query",

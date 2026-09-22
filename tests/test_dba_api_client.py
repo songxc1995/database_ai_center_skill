@@ -380,116 +380,107 @@ class DbaApiClientTest(unittest.TestCase):
         error = json.loads(result.stderr)
         self.assertEqual(error["error"], "free_form_sql_not_supported")
 
-    def test_business_inference_evidence_returns_only_the_model_safe_table_signals(self):
-        RecordingHandler.responses["/api/v2/instances/12/diagnostics/probe"] = (
+    def test_business_inference_evidence_reads_only_the_persisted_metadata_snapshot(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
             200,
             {
-                "available": True,
-                "db_type": "mysql",
-                "instance_id": 12,
-                "probe": "table_inventory",
-                "rows": [
-                    {"table_name": "wf_request", "table_comment": "流程请求"},
-                    {"table_name": "hr_employee", "table_comment": "员工主数据"},
-                    {"table_name": "sys_config", "table_comment": ""},
-                ],
-                "row_limit": 500,
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "collected_at": "2026-09-22T02:31:00Z",
+                "object_count": 3,
+                "excluded_objects": 0,
                 "total": 3,
                 "truncated": False,
-                "note": None,
+                "items": [
+                    {"schema_name": "ecology", "object_name": "wf_request", "object_type": "table", "object_comment": "流程请求"},
+                    {"schema_name": "ecology", "object_name": "hr_employee", "object_type": "table", "object_comment": "员工主数据"},
+                    {"schema_name": "ecology", "object_name": "sys_config", "object_type": "table", "object_comment": ""},
+                ],
             },
         )
 
         result = self.run_client(
             "business-inference-evidence",
-            "--instance-id",
-            "12",
-            "--database",
-            "ecology",
+            "--database-id",
+            "41",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(len(RecordingHandler.requests), 1, "业务推断取证只能复用一次现有只读探针")
+        self.assertEqual(len(RecordingHandler.requests), 1, "普通查询只读平台快照，不得连接业务库")
         request = RecordingHandler.requests[0]
-        self.assertEqual(request["method"], "POST")
-        self.assertEqual(request["path"], "/api/v2/instances/12/diagnostics/probe")
-        self.assertEqual(
-            json.loads(request["body"]),
-            {"probe": "table_inventory", "params": {"object_name": "ecology"}},
-        )
+        self.assertEqual(request["method"], "GET")
+        self.assertEqual(request["path"], "/api/v2/dba/metadata/databases/41/objects")
+        self.assertEqual(request["query"], {"limit": ["500"], "offset": ["0"]})
         body = json.loads(result.stdout)
         self.assertEqual(body["task"], "infer_database_business")
-        self.assertEqual(body["database_name"], "ecology")
+        self.assertEqual(body["database_id"], 41)
         self.assertEqual(body["evidence_status"], "ready")
         self.assertEqual(body["signal_quality"]["tables_returned"], 3)
         self.assertEqual(body["signal_quality"]["tables_with_comments"], 2)
         self.assertEqual(body["signal_quality"]["comment_coverage_pct"], 66.7)
         self.assertEqual(body["signal_quality"]["sample_scope"], "complete")
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "high")
-        self.assertEqual(body["items"][0], {"table_name": "wf_request", "table_comment": "流程请求"})
+        self.assertEqual(body["items"][0]["table_name"], "wf_request")
+        self.assertEqual(body["items"][0]["schema_name"], "ecology")
+        self.assertEqual(body["provenance"], "persisted_metadata_directory")
         self.assertNotIn("service_domain", body)
         self.assertNotIn("instance_name", body)
 
-    def test_business_inference_evidence_marks_a_truncated_commentless_prefix_as_limited(self):
-        RecordingHandler.responses["/api/v2/instances/12/diagnostics/probe"] = (
+    def test_business_inference_evidence_marks_a_partial_commentless_snapshot_as_limited(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
             200,
             {
-                "available": True,
-                "db_type": "mysql",
-                "instance_id": 12,
-                "probe": "table_inventory",
-                "rows": [
-                    {"table_name": "accountmoremenuinfo", "table_comment": ""},
-                    {"table_name": "actionsetting", "table_comment": None},
-                ],
-                "row_limit": 500,
-                "total": None,
+                "database_id": 41,
+                "status": "partial",
+                "completeness": "partial",
+                "collected_at": None,
+                "object_count": 0,
+                "excluded_objects": 2,
+                "total": 2,
                 "truncated": True,
-                "note": None,
+                "items": [
+                    {"schema_name": "ecology", "object_name": "accountmoremenuinfo", "object_type": "table", "object_comment": ""},
+                    {"schema_name": "ecology", "object_name": "actionsetting", "object_type": "table", "object_comment": None},
+                ],
             },
         )
 
         result = self.run_client(
             "business-inference-evidence",
-            "--instance-id",
-            "12",
-            "--database",
-            "ecology",
+            "--database-id", "41",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         body = json.loads(result.stdout)
         self.assertEqual(body["evidence_status"], "ready")
-        self.assertEqual(body["signal_quality"]["sample_scope"], "alphabetical_prefix")
+        self.assertEqual(body["signal_quality"]["sample_scope"], "partial_snapshot")
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "medium")
         self.assertEqual(body["signal_quality"]["comment_coverage_pct"], 0.0)
         self.assertEqual(
             [item["code"] for item in body["limitations"]],
-            ["truncated_alphabetical_prefix", "no_table_comments"],
+            ["partial_snapshot", "no_table_comments"],
         )
 
-    def test_business_inference_evidence_for_an_unavailable_probe_forbids_inference(self):
-        RecordingHandler.responses["/api/v2/instances/12/diagnostics/probe"] = (
+    def test_business_inference_evidence_for_an_unavailable_snapshot_forbids_inference(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
             200,
             {
-                "available": False,
-                "db_type": "mysql",
-                "instance_id": 12,
-                "probe": "table_inventory",
-                "rows": [],
-                "row_limit": 500,
+                "database_id": 41,
+                "status": "never_collected",
+                "completeness": None,
+                "collected_at": None,
+                "object_count": 0,
+                "excluded_objects": 0,
                 "total": 0,
                 "truncated": False,
-                "note": "Instance has no stored credentials to probe (agentless record)",
+                "items": [],
             },
         )
 
         result = self.run_client(
             "business-inference-evidence",
-            "--instance-id",
-            "12",
-            "--database",
-            "ecology",
+            "--database-id", "41",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -497,38 +488,51 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(body["evidence_status"], "unavailable")
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "none")
         self.assertEqual(body["items"], [])
-        self.assertEqual([item["code"] for item in body["limitations"]], ["probe_unavailable"])
+        self.assertEqual([item["code"] for item in body["limitations"]], ["snapshot_unavailable"])
 
-    def test_business_inference_evidence_does_not_treat_an_empty_inventory_as_no_business(self):
-        RecordingHandler.responses["/api/v2/instances/12/diagnostics/probe"] = (
+    def test_business_inference_evidence_does_not_treat_an_empty_snapshot_as_no_business(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
             200,
             {
-                "available": True,
-                "db_type": "oracle",
-                "instance_id": 12,
-                "probe": "table_inventory",
-                "rows": [],
-                "row_limit": 500,
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "collected_at": "2026-09-22T02:31:00Z",
+                "object_count": 0,
+                "excluded_objects": 0,
                 "total": 0,
                 "truncated": False,
-                "note": "0 rows is an abnormal signal; investigate visibility or an empty schema",
+                "items": [],
             },
         )
 
         result = self.run_client(
             "business-inference-evidence",
-            "--instance-id",
-            "12",
-            "--database",
-            "BI",
+            "--database-id", "41",
         )
 
         self.assertEqual(result.returncode, 0, result.stderr)
         body = json.loads(result.stdout)
         self.assertEqual(body["evidence_status"], "insufficient")
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "none")
-        self.assertEqual(body["note"], "0 rows is an abnormal signal; investigate visibility or an empty schema")
-        self.assertEqual([item["code"] for item in body["limitations"]], ["empty_table_inventory"])
+        self.assertEqual([item["code"] for item in body["limitations"]], ["empty_metadata_snapshot"])
+
+    def test_metadata_directory_commands_map_to_the_read_and_admin_endpoints(self):
+        cases = [
+            (("metadata-coverage",), "GET", "/api/v2/dba/metadata/coverage"),
+            (("database-objects", "--database-id", "41"), "GET", "/api/v2/dba/metadata/databases/41/objects"),
+            (("database-object-changes", "--database-id", "41"), "GET", "/api/v2/dba/metadata/databases/41/changes"),
+            (("search-database-objects", "--name", "order", "--match", "prefix"), "GET", "/api/v2/dba/metadata/objects/search"),
+            (("refresh-database-metadata", "--database-id", "41"), "POST", "/api/v2/dba/metadata/databases/41/refresh"),
+            (("metadata-refresh-status", "--run-id", "9"), "GET", "/api/v2/dba/metadata/refresh-runs/9"),
+        ]
+        for argv, method, path in cases:
+            with self.subTest(command=argv[0]):
+                RecordingHandler.requests = []
+                result = self.run_client(*argv)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(RecordingHandler.requests[0]["method"], method)
+                self.assertEqual(RecordingHandler.requests[0]["path"], path)
 
     def test_kb_search_sends_semantic_and_filter_params(self):
         result = self.run_client(

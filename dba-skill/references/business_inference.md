@@ -6,21 +6,21 @@ Use this workflow when the user asks what business a database probably serves an
 
 ```bash
 python scripts/dba_api_client.py business-inference-evidence \
-  --instance-id <ID> \
-  --database <DATABASE_OR_SCHEMA>
+  --database-id <DATABASE_ID>
 ```
 
-The command makes exactly one existing, allowlisted `table_inventory` probe call. It reads table names and table comments only. It does not read table contents, row counts, sizes, SQL text, contacts, instance names, or the stored `service_domain`, and performs no write.
+The command reads all pages of the persisted metadata-directory snapshot. It never connects to the source database. It returns object names, types and comments plus snapshot status, completeness and collection time. It does not read table contents, row counts, sizes, SQL text, contacts, instance names, or the stored `service_domain`, and performs no write.
 
 Do not substitute `instance`, `databases-search`, or ownership endpoints before inference: their names and stored ownership fields leak the answer and turn the inference into a lookup. Use them only to resolve the caller's target before starting, or after producing a blind inference when the user explicitly asks for validation against the recorded value.
 
 ## Decide whether inference is allowed
 
-- `evidence_status=unavailable`: stop. Report the probe's `note` and the `probe_unavailable` limitation.
+- `evidence_status=unavailable`: stop. Report snapshot status and the `snapshot_unavailable` limitation.
 - `evidence_status=insufficient`: stop. An empty table inventory is not proof that the database has no business purpose.
 - `evidence_status=ready`: inference is allowed, subject to `signal_quality.confidence_ceiling`.
 - `confidence_ceiling` is a hard maximum. Lower it whenever signals conflict or remain generic.
-- `sample_scope=alphabetical_prefix` means the row limit was reached. Unseen tables may contradict the visible prefix; never call this a complete inventory.
+- `sample_scope=partial_snapshot` means collection or retrieval was incomplete. Missing objects may contradict the visible evidence; never call this a complete inventory.
+- Treat an old `collected_at` as historical evidence and state its age. Do not imply it is the current live schema.
 - `no_table_comments` means only names are available. Several independently meaningful names may support a low or medium inference; opaque names must produce `insufficient_evidence`.
 
 ## Separate signals from noise
@@ -52,7 +52,7 @@ Return a concise Chinese object or equivalent prose with these semantics:
   ],
   "alternatives": ["credible competing interpretations"],
   "limitations": ["copy and explain material limitations from the evidence envelope"],
-  "provenance": "inferred from live table names/comments; not a recorded ownership fact"
+  "provenance": "inferred from persisted object names/comments; not a live query or recorded ownership fact"
 }
 ```
 

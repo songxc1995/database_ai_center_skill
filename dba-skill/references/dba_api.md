@@ -90,6 +90,11 @@ POST /instances/{id}/diagnostics/probe       # allowlisted probe names
 POST /instances/{id}/prometheus/query        # read-only PromQL
 ```
 
+An `admin` key additionally may queue the predefined metadata collector with
+`POST /dba/metadata/databases/{id}/refresh`. This is an explicit mutation of the platform
+queue, not permission for arbitrary SQL or a direct source-database query; ordinary metadata
+reads use the persisted snapshot.
+
 `diagnostics-run` **is** available to `ai-client`. A 403 on it means the key in use is not an
 `ai-client` key (a `viewer` key produces exactly this), not that the endpoint is closed —
 check the key before concluding the surface is smaller than it is.
