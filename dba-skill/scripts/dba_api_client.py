@@ -2396,6 +2396,79 @@ def cmd_probe_run(args: argparse.Namespace) -> Any:
     return _request("POST", f"/instances/{args.instance_id}/diagnostics/probe", body=body)
 
 
+def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
+    payload = _request(
+        "POST",
+        f"/instances/{args.instance_id}/diagnostics/probe",
+        body={"probe": "table_inventory", "params": {"object_name": args.database}},
+    )
+    rows = payload.get("rows") if isinstance(payload, dict) else None
+    items = [
+        {
+            "table_name": row.get("table_name"),
+            "table_comment": row.get("table_comment"),
+        }
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict)
+    ]
+    tables_with_comments = sum(
+        1 for row in items if str(row.get("table_comment") or "").strip()
+    )
+    available = bool(payload.get("available")) if isinstance(payload, dict) else False
+    truncated = bool(payload.get("truncated")) if isinstance(payload, dict) else False
+    limitations: list[dict[str, str]] = []
+    if not available:
+        limitations.append({
+            "code": "probe_unavailable",
+            "message": "The table inventory probe is unavailable; do not infer a business from this response.",
+        })
+    elif not items:
+        limitations.append({
+            "code": "empty_table_inventory",
+            "message": (
+                "The probe succeeded but returned no tables. This is insufficient evidence, not proof that "
+                "the database has no business purpose; carry the probe note and do not infer."
+            ),
+        })
+    elif truncated:
+        limitations.append({
+            "code": "truncated_alphabetical_prefix",
+            "message": (
+                "The probe returned only the alphabetically first table names up to its row limit; "
+                "unseen tables may carry different business signals."
+            ),
+        })
+    if available and items and tables_with_comments == 0:
+        limitations.append({
+            "code": "no_table_comments",
+            "message": (
+                "No returned table has a comment, so any inference must rely on table names alone "
+                "and should be low-confidence unless several names independently agree."
+            ),
+        })
+    return {
+        "task": "infer_database_business",
+        "instance_id": args.instance_id,
+        "database_name": args.database,
+        "db_type": payload.get("db_type") if isinstance(payload, dict) else None,
+        "available": available,
+        "evidence_status": "unavailable" if not available else ("ready" if items else "insufficient"),
+        "signal_quality": {
+            "tables_returned": len(items),
+            "tables_with_comments": tables_with_comments,
+            "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
+            "sample_scope": "alphabetical_prefix" if truncated else "complete",
+            "confidence_ceiling": "medium" if truncated else ("high" if items else "none"),
+        },
+        "row_limit": payload.get("row_limit") if isinstance(payload, dict) else None,
+        "total": payload.get("total") if isinstance(payload, dict) else None,
+        "truncated": truncated,
+        "note": payload.get("note") if isinstance(payload, dict) else None,
+        "limitations": limitations,
+        "items": items,
+    }
+
+
 def cmd_prometheus_query(args: argparse.Namespace) -> Any:
     body: dict[str, Any] = {"query": args.query}
     if args.url:
@@ -3236,6 +3309,15 @@ def _add_diagnostic_commands(sub) -> None:
     probe_run.add_argument("--object-name")
     probe_run.add_argument("--sql", help=argparse.SUPPRESS)
     probe_run.set_defaults(func=cmd_probe_run)
+
+    business_inference = sub.add_parser(
+        "business-inference-evidence",
+        help="Read-only table-name/comment evidence for a model to infer a database's likely business",
+    )
+    business_inference.add_argument("--instance-id", type=int)
+    business_inference.set_defaults(_needs_instance=True)
+    business_inference.add_argument("--database", required=True)
+    business_inference.set_defaults(func=cmd_business_inference_evidence)
 
     prometheus_query = sub.add_parser(
         "prometheus-query",

@@ -1,6 +1,6 @@
 ---
 name: dba-skill
-description: Live read-only DBA facts and analysis from Database AI Center — alerts, backups, ownership and contacts, inventory, cloud RDS cost, ELK logs, the knowledge base, and allowlisted live diagnostics against the database itself. Use when a question needs current data about the database estate rather than a guess; the server's own catalogues (ai-endpoints, probe-catalog) say what this particular deployment can do.
+description: Live read-only DBA facts and analysis from Database AI Center — alerts, backups, ownership and contacts, inventory, table-structure business inference, cloud RDS cost, ELK logs, the knowledge base, and allowlisted live diagnostics against the database itself. Use when a question needs current data about the database estate rather than a guess; the server's own catalogues (ai-endpoints, probe-catalog) say what this particular deployment can do.
 ---
 
 # DBA Skill
@@ -153,6 +153,7 @@ python scripts/dba_api_client.py probe-catalog --instance-id 12
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe slow_queries
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe sql_plan --sql-id gm9ttamf39c40
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe table_stats --object-name orders
+python scripts/dba_api_client.py business-inference-evidence --instance-id 12 --database ecology
 python scripts/dba_api_client.py probe-run --instance-id 12 --probe full_join_statements
 python scripts/dba_api_client.py prometheus-query --instance-id 8 --query 'count(pd_hotspot_status{type="hot_write_region_as_leader"} > 0)'
 python scripts/dba_api_client.py kb-search --q "connection pool exhausted" --db-type oracle
@@ -187,6 +188,7 @@ For asset, ownership, and governance questions:
    "the other 1,300 are in use" is false.
 6. Use `classification` for “哪些实例是 RAC / Data Guard / 单实例 / 主从”, “哪些是云 RDS”, and “哪些实例有备份” (topology + cloud + backup inventory).
 7. Use `cloud-monitoring-coverage --vendor aliyun --missing-only --all` for “哪些阿里云实例没有深度监控”. `cloud_only` still has vendor metrics but no live database connection; `misconfigured` was promoted to deep collection without complete credentials.
+8. Use `business-inference-evidence --instance-id N --database NAME` when asked what business a database probably serves. Then read [references/business_inference.md](references/business_inference.md) and perform the inference yourself; the command deliberately returns evidence, not a fabricated business label.
 
 For live list questions:
 
@@ -237,6 +239,12 @@ are `supported` on cloud MySQL.)
 For TiDB cluster-level signals not visible to SQL probes (Database AI Center `v2.63+`), use `prometheus-query --instance-id <cluster-head> --query '<promql>'` — a **read-only** instant PromQL against the cluster's Prometheus (SSRF-guarded, GET-only won't reach it). Use it to check hotspots (`pd_hotspot_status{type="hot_write_region_as_leader"}` per store), per-store request/flow skew (`sum(rate(tikv_grpc_msg_duration_seconds_count[5m])) by (instance)`), leader/region balance, golden signals, and to verify a metric name/value before authoring a rule. Read-only — never a write query.
 
 For database logs (Database AI Center `v2.24+`), use `elk-status` (are the ELK indices up?), `elk-coverage` (which instances are / are not shipping logs), and `elk-search --host-ip <ip> --levels ERROR,FATAL --start <iso> --end <iso>` to pull actual DB error-log lines as evidence. Search by the instance's host IP; narrow with `--levels` and a time window around the incident.
+
+### Inferring a database's likely business
+
+Use `business-inference-evidence` rather than assembling a prompt from instance detail or ownership metadata. It makes one existing, read-only `table_inventory` probe call and returns only the database name, engine, table names/comments, evidence quality, and limitations. It does not read table rows, sizes, SQL text, contacts, instance names, or the stored `service_domain`, and it never writes a conclusion back.
+
+Read [references/business_inference.md](references/business_inference.md) before drawing the conclusion. Its confidence ceiling is a hard maximum, not a suggested rating. `unavailable` or `insufficient` means stop and say why; a truncated alphabetical prefix or a commentless sample must lower confidence, and generic technical tables are not evidence of a business domain.
 
 ### Cloud RDS cost
 
@@ -320,7 +328,7 @@ The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classific
 `directory-options`, `freshness`, `sweeps`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
 `probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
 `cloud-monitoring-coverage`, `cloud-rightsizing`, `cloud-savings-realized`,
-`cloud-cost-history`, `backups`) are the **analysis core group** — the high-value read endpoints
+`cloud-cost-history`, `business-inference-evidence`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
 questions without needing to discover anything.
 
@@ -380,6 +388,7 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `sweeps` | `GET /dba/database-discovery/sweeps` (3.83+) — why an instance was, or was not, swept |
 | `diagnostics-catalog` / `diagnostics-run` | `GET`/`POST /dba/instances/{instance_id}/diagnostics/...` |
 | `probe-catalog` / `probe-run` | `GET`/`POST /instances/{instance_id}/diagnostics/...` (live, rate-limited) |
+| `business-inference-evidence` | `POST /instances/{instance_id}/diagnostics/probe` with fixed `table_inventory` — model-safe business inference evidence |
 | `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
 | `kb-search` / `kb-incidents` / `kb-doc-search` | `GET /knowledge/...` |
 | `elk-status` / `elk-coverage` / `elk-search` | `GET /elk/...` |
