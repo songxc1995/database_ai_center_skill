@@ -462,6 +462,95 @@ class DbaApiClientTest(unittest.TestCase):
             ["partial_snapshot", "no_table_comments"],
         )
 
+    def test_business_inference_evidence_never_allows_high_confidence_without_comments(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
+            200,
+            {
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "collected_at": "2026-09-22T02:31:00Z",
+                "object_count": 2,
+                "excluded_objects": 0,
+                "total": 2,
+                "truncated": False,
+                "items": [
+                    {"schema_name": "ecology", "object_name": "wf_request", "object_type": "table", "object_comment": None},
+                    {"schema_name": "ecology", "object_name": "hr_employee", "object_type": "table", "object_comment": ""},
+                ],
+            },
+        )
+
+        result = self.run_client("business-inference-evidence", "--database-id", "41")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(result.stdout)
+        self.assertEqual(body["signal_quality"]["confidence_ceiling"], "medium")
+        self.assertEqual([item["code"] for item in body["limitations"]], ["no_table_comments"])
+
+    def test_metadata_objects_all_pages_even_when_server_does_not_echo_limit_and_offset(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=0"] = (
+            200,
+            {
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "total": 3,
+                "truncated": True,
+                "items": [
+                    {"schema_name": "public", "object_name": "a", "object_type": "table"},
+                    {"schema_name": "public", "object_name": "b", "object_type": "table"},
+                ],
+            },
+        )
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=2"] = (
+            200,
+            {
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "total": 3,
+                "truncated": False,
+                "items": [
+                    {"schema_name": "public", "object_name": "c", "object_type": "view"},
+                ],
+            },
+        )
+
+        result = self.run_client(
+            "database-objects", "--database-id", "41", "--limit", "2", "--all"
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        body = json.loads(result.stdout)
+        self.assertEqual([item["object_name"] for item in body["items"]], ["a", "b", "c"])
+        self.assertFalse(body["truncated"])
+        self.assertTrue(body["fetched_all"])
+        self.assertEqual(len(RecordingHandler.requests), 2)
+
+    def test_metadata_objects_partial_warning_recommends_all_when_request_has_paging_params(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=0"] = (
+            200,
+            {
+                "database_id": 41,
+                "status": "ready",
+                "completeness": "complete",
+                "total": 3,
+                "truncated": True,
+                "items": [
+                    {"schema_name": "public", "object_name": "a", "object_type": "table"},
+                    {"schema_name": "public", "object_name": "b", "object_type": "table"},
+                ],
+            },
+        )
+
+        result = self.run_client("database-objects", "--database-id", "41", "--limit", "2")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        warning = json.loads(result.stderr)
+        self.assertIn("re-run with --all", warning["message"])
+        self.assertNotIn("does not page", warning["message"])
+
     def test_business_inference_evidence_for_an_unavailable_snapshot_forbids_inference(self):
         RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
             200,

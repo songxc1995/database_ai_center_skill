@@ -302,11 +302,11 @@ def _request(method: str, path: str, *, params: dict[str, Any] | None = None, bo
         # Same warning as the single-page path. Skipping it here was worse than not having it:
         # without --all the caller at least knows they asked for one page, while --all promises
         # to follow pagination to the end and then quietly stopped at 12% of the rows.
-        _warn_if_truncated(payload, path)
+        _warn_if_truncated(payload, path, request_params=params)
         return payload
     payload = _request_once(method, path, params=params, body=body)
     if method == "GET":
-        _warn_if_truncated(payload, path)
+        _warn_if_truncated(payload, path, request_params=params)
     return payload
 
 
@@ -348,7 +348,12 @@ def _envelope(payload: Any) -> tuple[list[Any] | None, dict[str, Any]]:
     return None, {}
 
 
-def _warn_if_truncated(payload: Any, path: str) -> None:
+def _warn_if_truncated(
+    payload: Any,
+    path: str,
+    *,
+    request_params: dict[str, Any] | None = None,
+) -> None:
     """Say so on stderr when a page is not the whole answer.
 
     A truncated page and a complete one are the same shape, so "no rows matched" and "your
@@ -373,7 +378,9 @@ def _warn_if_truncated(payload: Any, path: str) -> None:
         #   offset/limit or page/page_size; for the rest (e.g. `alerts` → /dba/alerts) it made no
         #   further request, yet this said "stopped at the page guard" and offered
         #   `--param limit=1000` — a usage error on that command (2026-09-15 eval).
-        pages = any(k in meta for k in ("offset", "limit", "page", "page_size"))
+        pages = any(k in meta for k in ("offset", "limit", "page", "page_size")) or any(
+            k in (request_params or {}) for k in ("offset", "limit", "page", "page_size")
+        )
         if _FETCH_ALL and pages:
             advice = (
                 f"--all stopped at the {_MAX_PAGES}-page guard. Raise it with --max-pages N, "
@@ -428,8 +435,8 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
     if not isinstance(total, int):
         return first
 
-    if "offset" in meta or "limit" in meta:
-        size = int(meta.get("limit") or len(items) or 1)
+    if "offset" in meta or "limit" in meta or ("offset" in params and "limit" in params):
+        size = int(meta.get("limit") or params.get("limit") or len(items) or 1)
         pages = 0
         while len(collected) < total and pages < page_limit and size > 0:
             pages += 1
@@ -438,9 +445,9 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
             if not more:
                 break
             collected.extend(more)
-    elif "page" in meta or "page_size" in meta:
-        size = int(meta.get("page_size") or len(items) or 1)
-        page = int(meta.get("page") or 1)
+    elif "page" in meta or "page_size" in meta or ("page" in params and "page_size" in params):
+        size = int(meta.get("page_size") or params.get("page_size") or len(items) or 1)
+        page = int(meta.get("page") or params.get("page") or 1)
         pages = 0
         while len(collected) < total and pages < page_limit and size > 0:
             pages += 1
@@ -2505,7 +2512,9 @@ def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
             "tables_with_comments": tables_with_comments,
             "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
             "sample_scope": "partial_snapshot" if partial else "complete",
-            "confidence_ceiling": "medium" if partial else ("high" if items else "none"),
+            "confidence_ceiling": (
+                "none" if not items else ("medium" if partial or tables_with_comments == 0 else "high")
+            ),
         },
         "total": payload.get("total") if isinstance(payload, dict) else None,
         "truncated": bool(payload.get("truncated")) if isinstance(payload, dict) else False,
