@@ -29,6 +29,42 @@ PROJECT_TIMEOUT_SECONDS=15
 PROJECT_STALE_AFTER_HOURS=72
 ```
 
+### AgentMesh STDIO MCP（先接入 MCP，不要求 AgentMesh 执行 Skill 脚本）
+
+`dba-skill/mcp_server.py` 是独立于平台后端的 STDIO MCP 入口。它复用现有 DBA 客户端的
+脱敏、端点发现与操作单调用，不直接连接业务数据库。需将本仓库的 `dba-skill/` 目录放在
+**AgentMesh 实际运行数字员工进程的机器或容器内**；只在管理页面填写本机不存在的路径不会启动。
+
+在该运行环境用 Python 3.10+ 安装 `requirements-mcp.txt`，然后在 AgentMesh 的「添加 MCP
+服务器」里选择 `STDIO`：
+
+```text
+服务器名称: database-ai-center
+命令: /absolute/path/to/python /absolute/path/to/dba-skill/mcp_server.py
+环境变量: PROJECT_API_BASE_URL=https://<platform-host>/api/v2
+          PROJECT_API_KEY=<单独签发给 AgentMesh 的 ai-client Key>
+超时时间: 180 秒（建议；平台仍有自己的更短超时和安全门禁）
+```
+
+不要把 Key 写进命令、Skill ZIP、提示词或代码仓库。AgentMesh 页面提供环境变量输入，
+**但其密文存储、回显控制与日志脱敏尚未由本仓库验证**；先用测试 Key 验证，再配正式 Key。
+数字员工必须能从运行环境访问平台的 `/api/v2` 地址。首次联调先调用 `dba_whoami`，
+再读取一个已知实例；检查工具调用审计与平台 Key 使用记录。不要以现有生产 Key 测试写工具。
+
+MCP 首批提供当前告警、实例、业务推断证据、动态只读端点目录与目录内 GET，以及
+`metadata_refresh` 操作单的提议、状态、执行、核验。**没有批准工具**：只有平台 `admin`
+能批准，AgentMesh 聊天文字不是批准；当前仍需管理员在平台页面确认。执行时平台会重新检查
+目标、时效、原申请 Key、负载与并发限制。钉钉会话内确认需要另做带身份核验的回调接入。
+工具返回统一为 `{ "data": <平台结果>, "warnings": [...] }`；回答前必须检查 `warnings`，
+特别是分页未取全和部分来源不可用，不能将其解释为「没有问题」。
+
+MCP 实现依赖官方 Python SDK `mcp>=2.2,<3`，支持 STDIO；若 AgentMesh 运行时采用旧版 MCP
+握手，须实际联调工具发现和调用，不能仅凭配置页判断兼容。MCP SDK 文档：
+https://py.sdk.modelcontextprotocol.io/run/
+
+测试：使用 Python 3.10+ 安装 `requirements-dev.txt` 与 `requirements-mcp.txt`，然后运行
+`python -m pytest tests -q`；其中包含真实 STDIO 启动、工具发现及环境变量传递的本地假平台测试。
+
 Zabbix:
 
 ```env

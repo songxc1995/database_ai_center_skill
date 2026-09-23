@@ -1,0 +1,2 @@
+# AgentMesh STDIO MCP adapter (Python 3.10+). The existing DBA CLI remains stdlib-only.
+mcp>=2.2,<3
