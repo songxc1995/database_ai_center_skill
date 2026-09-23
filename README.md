@@ -29,6 +29,10 @@ PROJECT_TIMEOUT_SECONDS=15
 PROJECT_STALE_AFTER_HOURS=72
 ```
 
+AgentMesh 的 Streamable HTTP MCP 网关现在由数据库平台主项目单独部署；本仓库只保留
+`dba-skill` 的提示词与客户端，不需要 MCP 运行时。配置与启动见主项目
+`docs/agentmesh-mcp-deployment.md`。
+
 Zabbix:
 
 ```env
@@ -66,7 +70,7 @@ ZABBIX_VERIFY_TLS=true
 ## Tests
 
 ```bash
-python3 -m pip install -r requirements-dev.txt   # 只有 pytest;客户端本身零依赖
+python3 -m pip install -r requirements-dev.txt   # 只测标准库客户端
 python3 -m pytest tests -q
 ```
 
@@ -74,7 +78,7 @@ python3 -m pytest tests -q
 而另一台机器上跑出的是 `No module named pytest` —— 仓库里没有任何东西说该装什么,README 也
 一个字没提。**安全网存在不等于安全网工作**:下一个人看到那句报错,大概率就跳过了。
 
-系统自带的 python3 可能是 3.9(macOS)。用例与客户端都兼容 3.9,但 `pytest` 需要自己装;
+系统自带的 python3 可能是 3.9(macOS)。标准库客户端兼容 3.9；`pytest` 需要自己装;
 不想污染系统环境就先建 venv。
 
 ## Compatibility Notes

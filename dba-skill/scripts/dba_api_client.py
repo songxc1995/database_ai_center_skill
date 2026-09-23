@@ -2568,6 +2568,30 @@ def cmd_metadata_refresh_status(args: argparse.Namespace) -> Any:
     return _request("GET", f"/dba/metadata/refresh-runs/{args.run_id}")
 
 
+def cmd_propose_metadata_refresh(args: argparse.Namespace) -> Any:
+    return _request(
+        "POST", "/dba/actions",
+        body={
+            "action_type": "metadata_refresh",
+            "database_id": args.database_id,
+            "reason": args.reason,
+            "evidence_refs": args.evidence_ref or [],
+        },
+    )
+
+
+def cmd_action_order_status(args: argparse.Namespace) -> Any:
+    return _request("GET", f"/dba/actions/{args.order_id}")
+
+
+def cmd_execute_action_order(args: argparse.Namespace) -> Any:
+    return _request("POST", f"/dba/actions/{args.order_id}/execute")
+
+
+def cmd_verify_action_order(args: argparse.Namespace) -> Any:
+    return _request("POST", f"/dba/actions/{args.order_id}/verify")
+
+
 def cmd_prometheus_query(args: argparse.Namespace) -> Any:
     body: dict[str, Any] = {"query": args.query}
     if args.url:
@@ -3467,6 +3491,27 @@ def _add_diagnostic_commands(sub) -> None:
     )
     refresh_status.add_argument("--run-id", type=int, required=True)
     refresh_status.set_defaults(func=cmd_metadata_refresh_status)
+
+    propose_action = sub.add_parser(
+        "propose-metadata-refresh",
+        help="AI client: propose one bounded metadata refresh for independent admin approval",
+    )
+    propose_action.add_argument("--database-id", type=int, required=True)
+    propose_action.add_argument("--reason", required=True)
+    propose_action.add_argument("--evidence-ref", action="append")
+    propose_action.set_defaults(func=cmd_propose_metadata_refresh)
+
+    action_status = sub.add_parser("action-order-status", help="Read one action order and its refresh status")
+    action_status.add_argument("--order-id", type=int, required=True)
+    action_status.set_defaults(func=cmd_action_order_status)
+
+    action_execute = sub.add_parser("execute-action-order", help="AI client: queue one independently approved order")
+    action_execute.add_argument("--order-id", type=int, required=True)
+    action_execute.set_defaults(func=cmd_execute_action_order)
+
+    action_verify = sub.add_parser("verify-action-order", help="AI client: persist server-side verification of a completed run")
+    action_verify.add_argument("--order-id", type=int, required=True)
+    action_verify.set_defaults(func=cmd_verify_action_order)
 
     prometheus_query = sub.add_parser(
         "prometheus-query",
