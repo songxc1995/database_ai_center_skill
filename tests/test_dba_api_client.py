@@ -614,6 +614,10 @@ class DbaApiClientTest(unittest.TestCase):
             (("search-database-objects", "--name", "order", "--match", "prefix"), "GET", "/api/v2/dba/metadata/objects/search"),
             (("refresh-database-metadata", "--database-id", "41"), "POST", "/api/v2/dba/metadata/databases/41/refresh"),
             (("metadata-refresh-status", "--run-id", "9"), "GET", "/api/v2/dba/metadata/refresh-runs/9"),
+            (("propose-metadata-refresh", "--database-id", "41", "--reason", "Snapshot is stale"), "POST", "/api/v2/dba/actions"),
+            (("action-order-status", "--order-id", "7"), "GET", "/api/v2/dba/actions/7"),
+            (("execute-action-order", "--order-id", "7"), "POST", "/api/v2/dba/actions/7/execute"),
+            (("verify-action-order", "--order-id", "7"), "POST", "/api/v2/dba/actions/7/verify"),
         ]
         for argv, method, path in cases:
             with self.subTest(command=argv[0]):
