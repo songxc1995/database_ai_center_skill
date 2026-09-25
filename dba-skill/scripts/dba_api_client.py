@@ -2511,7 +2511,7 @@ def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
             "tables_returned": len(items),
             "tables_with_comments": tables_with_comments,
             "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
-            "sample_scope": "partial_snapshot" if partial else "complete",
+            "sample_scope": "unavailable" if not available else ("partial_snapshot" if partial else "complete"),
             "confidence_ceiling": (
                 "none" if not items else ("medium" if partial or tables_with_comments == 0 else "high")
             ),

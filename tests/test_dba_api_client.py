@@ -576,6 +576,7 @@ class DbaApiClientTest(unittest.TestCase):
         body = json.loads(result.stdout)
         self.assertEqual(body["evidence_status"], "unavailable")
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "none")
+        self.assertEqual(body["signal_quality"]["sample_scope"], "unavailable")
         self.assertEqual(body["items"], [])
         self.assertEqual([item["code"] for item in body["limitations"]], ["snapshot_unavailable"])
 
