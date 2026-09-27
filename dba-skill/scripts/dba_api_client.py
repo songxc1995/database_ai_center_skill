@@ -16,6 +16,19 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+# Keep the command path and direct importlib loading used by hosts; the sibling
+# dba_client package is installed with the skill directory.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from dba_client import alerts as _alerts
+from dba_client import backups as _backups
+from dba_client import core as _core
+from dba_client import cost as _cost
+from dba_client import diagnostics as _diagnostics
+from dba_client import elk as _elk
+from dba_client import inventory as _inventory
+from dba_client import knowledge as _knowledge
+from dba_client import metadata as _metadata
+
 
 READ_TIMEOUT_DEFAULT = 15
 ENV_FILE_NAMES = (".env",)
@@ -1462,60 +1475,19 @@ def _common_filter_params(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def cmd_resolve(args: argparse.Namespace) -> Any:
-    params = _common_filter_params(args)
-    params.update(
-        {
-            "host": args.host,
-            "ip": args.ip,
-            "instance_name": args.instance_name,
-            "database_name": args.database_name,
-            "alert_id": args.alert_id,
-            "limit": args.limit,
-        }
-    )
-    return _request("GET", "/dba/resolve", params=params)
+    return _alerts.cmd_resolve(args, globals())
 
 
 def cmd_context(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/dba/context",
-        params={
-            "alert_id": args.alert_id,
-            "instance_id": args.instance_id,
-            "database_id": args.database_id,
-            "refresh_ai_context": args.refresh_ai_context,
-            "stale_after_hours": args.stale_after_hours,
-        },
-    )
+    return _alerts.cmd_context(args, globals())
 
 
 def cmd_alert_evidence(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        f"/dba/alerts/{args.alert_id}/evidence",
-        params={"before_hours": args.before_hours, "after_hours": args.after_hours},
-    )
+    return _alerts.cmd_alert_evidence(args, globals())
 
 
 def cmd_alerts(args: argparse.Namespace) -> Any:
-    """Flat current-alert list (platform v3.32+).
-
-    Prefer this over ``alerts-list``: the instance name/host/type are inlined and the
-    triggering actual/threshold are lifted out of the evidence blob, so answering "what is
-    alerting right now" is one call with no per-alert follow-up and no wading through the
-    platform's internal ``_dac_*`` bookkeeping fields.
-    """
-    return _request(
-        "GET",
-        "/dba/alerts",
-        params={
-            "status": args.status,
-            "severity": args.severity,
-            "instance_id": args.instance_id,
-            "limit": args.limit,
-        },
-    )
+    return _alerts.cmd_alerts(args, globals())
 
 
 def _short_reason(exc: BaseException) -> str:
@@ -1525,247 +1497,79 @@ def _short_reason(exc: BaseException) -> str:
 
 
 def cmd_whoami(args: argparse.Namespace) -> Any:
-    """Identity, reach, limits and platform health — the four things to know before trusting
-    an answer, in one call instead of three nobody thinks to make.
-
-    A new user's first failure is almost never the question they asked: it is a key that
-    expired, a role that cannot reach the endpoint, a rate limit they walked into, or a
-    platform that is itself in a bad state. Each of those has its own endpoint; none of them
-    is the one a person reaches for.
-    """
-    out: dict[str, Any] = {"credentials": _credential_provenance()}
-    try:
-        out["identity"] = _request("GET", "/auth/verify")
-    except SystemExit:
-        raise
-    for label, path in (("platform", "/observability/version"),
-                        ("self_check", "/observability/self-check")):
-        try:
-            payload = _request_once("GET", path)
-        except Exception as exc:  # noqa: BLE001 - a partial answer beats no answer here
-            out[label] = {"unavailable": _short_reason(exc)}
-            continue
-        if label == "self_check" and isinstance(payload, dict):
-            payload = {k: v for k, v in payload.items() if k != "results"}
-        out[label] = payload
-    return out
+    return _core.cmd_whoami(args, globals())
 
 
 def cmd_self_check(args: argparse.Namespace) -> Any:
-    """Ask the platform whether it is currently contradicting itself.
-
-    37 cross-subsystem invariants, each carrying the incident that motivated it. Worth running
-    before reporting that anything is absent: "no alerts", "no backups", "no metrics" and "the
-    platform cannot currently tell" are different answers, and only this endpoint distinguishes
-    them. A violating check names the rows it caught, so it doubles as a lead.
-    """
-    payload = _request("GET", "/observability/self-check")
-    if not getattr(args, "violations_only", False) or not isinstance(payload, dict):
-        return payload
-    return {
-        **{k: v for k, v in payload.items() if k != "results"},
-        "results": [r for r in (payload.get("results") or []) if r.get("violations")],
-    }
+    return _core.cmd_self_check(args, globals())
 
 
 def cmd_backups_coverage(args: argparse.Namespace) -> Any:
-    """Fleet backup coverage across BOTH tracks (local RMAN/expdp + offsite NAS).
-
-    Defaults to ``at_risk`` because that is what the question almost always means; pass
-    ``--verdict all`` for the whole estate. ``not_applicable`` covers cloud RDS (the provider
-    backs those up) and cluster components (backup is cluster-level) — counting them as
-    at-risk buries the real findings, so they are a separate bucket, not a failure.
-    """
-    verdict = None if args.verdict == "all" else args.verdict
-    return _request(
-        "GET",
-        "/dba/backups/coverage",
-        params={
-            "verdict": verdict,
-            "instance_type": args.instance_type,
-            "exclude_cloud": "true" if getattr(args, "exclude_cloud", False) else None,
-            "cloud_vendor": getattr(args, "cloud_vendor", None),
-            "environment": getattr(args, "environment", None),
-            "limit": args.limit,
-        },
-    )
+    return _backups.cmd_backups_coverage(args, globals())
 
 
 def cmd_capacity_forecast(args: argparse.Namespace) -> Any:
-    """Projected resource exhaustion — including trends too far out to alert.
-
-    ``would_alert`` is reported per row rather than used as a filter: a tablespace 200 days
-    from full never appears in the alert list, and that lead time is the whole point. Pass
-    ``--include-gaps`` to also see the instances that could NOT be projected, with reasons —
-    an instance missing from the list is not the same as an instance with no risk.
-    """
-    return _request(
-        "GET",
-        "/dba/capacity/forecast",
-        params={
-            "metric_name": args.metric_name,
-            "max_days": args.max_days,
-            "include_gaps": "true" if args.include_gaps else None,
-            "limit": args.limit,
-        },
-    )
+    return _cost.cmd_capacity_forecast(args, globals())
 
 
 def cmd_silence_report(args: argparse.Namespace) -> Any:
-    """Why one instance might not be alerting — all five mechanisms, active or not.
-
-    Checking two of the five and concluding "nothing is suppressed" is the failure this
-    replaces; inactive mechanisms are listed precisely so the caller can tell it looked
-    everywhere.
-    """
-    return _request("GET", "/dba/instances/{0}/silence-report".format(args.instance_id))
+    return _alerts.cmd_silence_report(args, globals())
 
 
 def cmd_alerts_list(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/alerts",
-        params={
-            "status": None if args.all_statuses else args.status,
-            "severity": args.severity,
-            "tenant_id": args.tenant_id,
-            "instance_id": args.instance_id,
-            "page": args.page,
-            "page_size": args.page_size,
-            "start_time": args.start_time,
-            "end_time": args.end_time,
-        },
-    )
+    return _alerts.cmd_alerts_list(args, globals())
 
 
 def cmd_classification(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/instances/classification",
-        params={
-            "type": args.type,
-            "topology": args.topology,
-            "tenant_id": args.tenant_id,
-            "limit": getattr(args, "limit", None),
-        },
-    )
+    return _inventory.cmd_classification(args, globals())
 
 
 def cmd_inventory_summary(args: argparse.Namespace) -> Any:
-    params = _common_filter_params(args)
-    params.update(
-        {
-            "include_system_dbs": args.include_system_dbs,
-            "stale_after_hours": args.stale_after_hours,
-        }
-    )
-    return _request("GET", "/dba/inventory/summary", params=params)
+    return _inventory.cmd_inventory_summary(args, globals())
 
 
 def cmd_databases_search(args: argparse.Namespace) -> Any:
-    params = _common_filter_params(args)
-    params.update(
-        {
-            "status": args.status,
-            "include_inactive": args.include_inactive,
-            "include_system_dbs": args.include_system_dbs,
-            "is_in_use": args.is_in_use,
-            "limit": args.limit,
-            "offset": args.offset,
-        }
-    )
-    return _request("GET", "/dba/databases/search", params=params)
+    return _inventory.cmd_databases_search(args, globals())
 
 
 def cmd_databases_unused(args: argparse.Namespace) -> Any:
-    params = _common_filter_params(args)
-    params.update({"include_inactive": args.include_inactive, "limit": args.limit})
-    return _request("GET", "/dba/databases/unused", params=params)
+    return _inventory.cmd_databases_unused(args, globals())
 
 
 def cmd_ownership_scope(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/dba/ownership/scope",
-        params={
-            "contact": args.contact,
-            "contact_role": args.contact_role,
-            "department": args.department,
-            "service_domain": args.service_domain,
-            "business": args.business,
-            "tenant_id": args.tenant_id,
-            "include_inactive": args.include_inactive,
-            "include_system_dbs": args.include_system_dbs,
-            "stale_after_hours": args.stale_after_hours,
-        },
-    )
+    return _inventory.cmd_ownership_scope(args, globals())
 
 
 def cmd_directory_options(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/dba/directory/options",
-        params={
-            "type": args.type,
-            "search": args.search,
-            "include_inactive": args.include_inactive,
-            "limit": args.limit,
-        },
-    )
+    return _inventory.cmd_directory_options(args, globals())
 
 
 def cmd_freshness(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        f"/dba/instances/{args.instance_id}/freshness",
-        params={"stale_after_hours": args.stale_after_hours},
-    )
+    return _alerts.cmd_freshness(args, globals())
 
 
 def cmd_sweeps(args: argparse.Namespace) -> Any:
-    """Nightly database-discovery sweep runs (platform 3.83.0+).
-
-    Answers "why was this instance not discovered last night?" — a question that previously had
-    no answer anywhere: the sweep computed the skip reasons and threw them into a log line.
-    Each row carries the skipped distribution, which is the whole point of reading this.
-    """
-    return _request("GET", "/dba/database-discovery/sweeps", params={"limit": args.limit})
+    return _inventory.cmd_sweeps(args, globals())
 
 
 def cmd_timeline(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        f"/dba/instances/{args.instance_id}/timeline",
-        params={"hours": args.hours, "limit": args.limit},
-    )
+    return _alerts.cmd_timeline(args, globals())
 
 
 def cmd_diagnostics_catalog(args: argparse.Namespace) -> Any:
-    return _request("GET", f"/dba/instances/{args.instance_id}/diagnostics/catalog")
+    return _diagnostics.cmd_diagnostics_catalog(args, globals())
 
 
 def cmd_diagnostics_run(args: argparse.Namespace) -> Any:
-    if args.sql:
-        _fail(
-            "free_form_sql_not_supported",
-            "diagnostics-run only accepts catalog check ids; free-form SQL is not supported",
-            exit_code=2,
-        )
-    body: dict[str, Any] = {"checks": _checks(args.checks)}
-    if args.timeout_seconds is not None:
-        body["timeout_seconds"] = args.timeout_seconds
-    if args.database_name:
-        body["database_name"] = args.database_name
-    return _request("POST", f"/dba/instances/{args.instance_id}/diagnostics/run", body=body)
+    return _diagnostics.cmd_diagnostics_run(args, globals())
 
 
 def cmd_probe_catalog(args: argparse.Namespace) -> Any:
-    return _request("GET", f"/instances/{args.instance_id}/diagnostics/catalog")
+    return _diagnostics.cmd_probe_catalog(args, globals())
 
 
 def cmd_ai_endpoints(args: argparse.Namespace) -> Any:
-    _ = args
-    return _request("GET", "/ai-endpoints")
+    return _core.cmd_ai_endpoints(args, globals())
 
 
 def _try_get(path: str, params: dict[str, Any] | None = None) -> Any:
@@ -1826,44 +1630,7 @@ def _fail_if_instance_missing(instance_id: Any, detail: Any) -> None:
 
 
 def cmd_instance(args: argparse.Namespace) -> Any:
-    """Everything about one instance, from an id or an IP, in one call.
-
-    "Here is an IP, tell me about this box" is the most frequent question and it used to take
-    several calls across two path prefixes. Each part is fetched independently and a missing
-    part is reported as `unavailable` rather than collapsing the whole answer.
-    """
-    instance_id = args.instance_id
-    resolved: Any = None
-    if instance_id is None:
-        if not (args.ip or args.host):
-            _fail("invalid_argument", "instance requires --instance-id, --ip or --host", exit_code=2)
-        resolved = _try_get("/dba/resolve", _clean_params({"ip": args.ip, "host": args.host}))
-        for key in ("instances", "matches", "items"):
-            rows = resolved.get(key) if isinstance(resolved, dict) else None
-            if isinstance(rows, list) and rows and isinstance(rows[0], dict):
-                instance_id = rows[0].get("instance_id") or rows[0].get("id")
-                break
-        if instance_id is None:
-            _fail("not_found", f"no instance matched ip={args.ip} host={args.host}",
-                  exit_code=1, resolve_response=resolved)
-
-    detail = _try_get(f"/instances/{instance_id}")
-    _fail_if_instance_missing(instance_id, detail)
-    databases = _try_get("/databases", {"instance_id": instance_id, "limit": 1})
-    alerts = _try_get("/alerts", {"instance_id": instance_id, "status": "active", "page_size": 50})
-    alert_items, _ = _envelope(alerts)
-    db_items, db_meta = _envelope(databases)
-    return {
-        "instance_id": instance_id,
-        "instance": detail,
-        "freshness": _try_get(f"/dba/instances/{instance_id}/freshness"),
-        "backups": _try_get(f"/instances/{instance_id}/backups"),
-        "database_count": db_meta.get("total") if db_meta else (len(db_items) if db_items else None),
-        "database_inventory_coverage": (detail or {}).get("database_inventory_coverage")
-        if isinstance(detail, dict) else None,
-        "active_alerts": alert_items or [],
-        "resolved_from": {"ip": args.ip, "host": args.host} if resolved is not None else None,
-    }
+    return _inventory.cmd_instance(args, globals())
 
 
 # What a newly onboarded instance is usually missing. Each is a separate subsystem, so
@@ -1872,159 +1639,7 @@ _ONBOARDING_CHECKS = ("database_inventory", "backup_method", "ownership", "elk_l
 
 
 def cmd_onboarding_check(args: argparse.Namespace) -> Any:
-    """Is this newly onboarded instance actually wired up?
-
-    Metrics start flowing immediately, which is exactly what makes the rest easy to miss:
-    databases undiscovered, backup method undeclared, no owner, not shipping logs. Four
-    subsystems, four separate answers — this asks all four and says which are missing.
-
-    Each check has four possible outcomes, not two: covered, a real gap, not this instance's
-    job, or unanswerable right now. Collapsing the last two into "missing" is what turned a
-    throttled fleet sweep into 17 fabricated backup gaps on instances the platform had
-    already declared not applicable.
-    """
-    iid = args.instance_id
-    detail = _try_get(f"/instances/{iid}")
-    _fail_if_instance_missing(iid, detail)
-    databases = _try_get("/databases", {"instance_id": iid, "limit": 1})
-    backups = _try_get(f"/instances/{iid}/backups")
-    # Fleet-wide tables, shared across a fan-out rather than refetched per instance.
-    elk = _try_get_shared("/elk/coverage")
-    coverage_payload = _try_get_shared("/dba/backups/coverage", {"limit": 2000})
-
-    detail_ok = isinstance(detail, dict) and not _unavailable(detail)
-    db_items, db_meta = _envelope(databases)
-    db_count = db_meta.get("total") if db_meta else (len(db_items) if db_items else 0)
-    coverage = detail.get("database_inventory_coverage") if detail_ok else None
-    method = (backups or {}).get("backup_method") if isinstance(backups, dict) else None
-    contact = detail.get("contact_person") if detail_ok else None
-    host = detail.get("host") if detail_ok else None
-    cluster_id = detail.get("cluster_id") if detail_ok else None
-
-    # /elk/coverage is a fourth shape again: the rows live under `instances`, each carrying
-    # its own `covered` flag. Matching on `items` + host returned an empty set and reported
-    # every instance as "not shipping logs" — a wrong-field lookup and a genuine gap produce
-    # the same empty answer, which is the whole reason this command reports `unavailable`
-    # separately from `ok: false`.
-    elk_rows = elk.get("instances") if isinstance(elk, dict) else None
-    elk_readable = isinstance(elk_rows, list)
-    elk_row = next(
-        (r for r in (elk_rows or [])
-         if isinstance(r, dict) and str(r.get("id")) == str(iid)), None
-    )
-
-    # Whether these subsystems are this instance's job at all — read from the platform, not
-    # re-derived here. Cloud RDS has no host to ship logs from and its backups belong to the
-    # vendor, so "no logs" and "no backup_method" are correct states, not gaps. Reporting them
-    # as missing would hang a permanent false gap on all 115 cloud instances, and a checklist
-    # that is never green is one people stop reading. The platform already answers both
-    # (`applicable` on the ELK row, `not_applicable` as the backup verdict); asking it keeps
-    # one definition of the rule instead of a copy here that drifts.
-    coverage_rows, _ = _envelope(coverage_payload)
-    coverage_readable = not _unavailable(coverage_payload) and coverage_rows is not None
-    backup_row = next(
-        (r for r in (coverage_rows or [])
-         if isinstance(r, dict) and str(r.get("instance_id")) == str(iid)), None
-    )
-    backup_na = (backup_row or {}).get("verdict") == "not_applicable"
-    backup_na_reason = "; ".join((backup_row or {}).get("reasons") or []) or None
-    elk_na = elk_row is not None and elk_row.get("applicable") is False
-    elk_na_reason = (elk_row or {}).get("not_applicable_reason")
-    # A cluster component's owner is held by the cluster head — the same shape as its backup,
-    # which the platform already calls not applicable. Demanding one per component turned a
-    # single unowned TiDB cluster into 21 identical "no owner" rows, burying the one row that
-    # someone could actually act on.
-    component = coverage == "cluster_component"
-
-    # An instance that is not in service is not being onboarded. The platform's own coverage
-    # tables list active instances only, so judging a retired one against them produced three
-    # "gaps" on a decommissioned host — an item nobody can close, on a checklist people are
-    # meant to work through to zero.
-    status = str(detail.get("status") or "").strip().lower() if detail_ok else ""
-    if status and status != "active":
-        reason = f"instance status={status}: not in service, nothing to onboard"
-        checks = {name: {"ok": None, "not_applicable": reason}
-                  for name in ("database_inventory", "backup_method", "ownership", "elk_logs")}
-        return {
-            "instance_id": iid, "checks": checks, "missing": [],
-            "not_applicable": list(checks), "unknown": [], "unavailable": [],
-            "status": status, "ok": True,
-        }
-
-    findings: dict[str, dict[str, Any]] = {}
-
-    # An empty list on a cluster member is correct: the owner holds the rows.
-    if _unavailable(databases) or not detail_ok:
-        findings["database_inventory"] = {
-            "ok": None, "unavailable": "could not read the instance or its databases"}
-    else:
-        findings["database_inventory"] = {
-            "ok": bool(db_count) or coverage in ("cluster_covered", "cluster_component"),
-            "databases": db_count, "coverage": coverage,
-        }
-
-    if not coverage_readable:
-        # Without the coverage table there is no way to know whether this instance's backups
-        # are even ours to declare, so an undeclared method proves nothing.
-        findings["backup_method"] = {
-            "ok": None, "unavailable": "could not read /dba/backups/coverage"}
-    elif backup_na:
-        findings["backup_method"] = {
-            "ok": None, "not_applicable": backup_na_reason or "backups are the provider's"}
-    elif backup_row is None:
-        # Readable table, no row for this instance — that is not evidence of anything.
-        findings["backup_method"] = {
-            "ok": None,
-            "unavailable": "no row in /dba/backups/coverage, so whether backups are this "
-                           "instance's responsibility is unknown"}
-    elif _unavailable(backups):
-        findings["backup_method"] = {
-            "ok": None, "unavailable": f"could not read /instances/{iid}/backups"}
-    else:
-        findings["backup_method"] = {
-            "ok": bool(method), "backup_method": method,
-            "why": "undeclared makes 'no backup' and 'expdp not declared' indistinguishable"}
-
-    if not detail_ok:
-        findings["ownership"] = {"ok": None, "unavailable": f"could not read /instances/{iid}"}
-    elif component:
-        findings["ownership"] = {
-            "ok": None, "cluster_id": cluster_id,
-            "not_applicable": (
-                f"cluster component: the owner is held by cluster head {cluster_id}"
-                if cluster_id is not None else
-                "cluster component: the owner is held by the cluster head"),
-        }
-    else:
-        findings["ownership"] = {"ok": bool(contact), "contact_person": contact}
-
-    # Three states, not two: covered, a real gap, or not this instance's job. Unreadable
-    # coverage is a fourth — say which one it is rather than folding them together.
-    findings["elk_logs"] = (
-        {"ok": None, "host": host,
-         "not_applicable": elk_na_reason or "logs are not shipped for this instance kind"}
-        if elk_na else
-        {"ok": bool(elk_row and elk_row.get("covered")), "host": host}
-        if elk_readable
-        else {"ok": None, "host": host, "unavailable": "could not read /elk/coverage"}
-    )
-
-    missing = [name for name, f in findings.items() if f["ok"] is False]
-    not_applicable = [name for name, f in findings.items() if f.get("not_applicable")]
-    unavailable = [name for name, f in findings.items() if f.get("unavailable")]
-    unknown = [name for name, f in findings.items()
-               if f["ok"] is None and name not in not_applicable]
-    return {
-        "instance_id": iid,
-        "checks": findings,
-        "missing": missing,
-        "not_applicable": not_applicable,
-        # A check the platform could not answer is reported apart from one it answered "no":
-        # collapsing them would let an outage read as a clean bill of health.
-        "unknown": unknown,
-        "unavailable": unavailable,
-        "ok": not missing and not unknown,
-    }
+    return _inventory.cmd_onboarding_check(args, globals())
 
 
 def _normalize_read_path(raw: str) -> str:
@@ -2075,969 +1690,115 @@ def _resolve_instance_id(args: argparse.Namespace) -> Any:
 
 
 def cmd_topology(args: argparse.Namespace) -> Any:
-    """谁复制给谁 —— 含**未纳管的外部主机**,而这正是 `/clusters` 给不出的那部分。
-
-    "这台的主库/备库是谁"以前被文档指向 `/clusters`。那是另一个问题的答案:集群成员关系
-    只能包含**纳管的**实例。生产 2026-09-08 实测:37 条复制边里 **33 条(89%)**有一端是
-    `ext:` 开头的外部主机,229 个节点里 33 个是外部的。所以 `/clusters` 最多能看见 4 条 ——
-    **而它给出的答案看起来是完整的**,这比给不出更糟。
-
-    边只带 id,不带名字。不 inline 的话,每个调用方都得自己拿 nodes 做一次连接,而那一步
-    做错了没有任何东西会报错 —— 和 `alerts` 把 instance 名字 inline 进来是同一个理由。
-    """
-    payload = _request("GET", "/topology")
-    if not isinstance(payload, dict):
-        return payload
-    nodes = {n.get("id"): n for n in (payload.get("nodes") or []) if isinstance(n, dict)}
-    edges = [e for e in (payload.get("edges") or []) if isinstance(e, dict)]
-
-    def side(ref: Any) -> dict[str, Any]:
-        if isinstance(ref, str) and ref.startswith("ext:"):
-            # 未纳管:平台只知道它的地址,别的一无所知。说清楚,不要留一个裸 id。
-            return {"ref": ref, "external": True, "endpoint": ref[4:], "name": None,
-                    "note": "未纳管主机——平台只知道地址,没有它的指标/备份/负责人"}
-        node = nodes.get(ref) or {}
-        # ★ **透传,不是白名单。** 第一版挑了 5/12 个键,丢掉的里面有 role_detail(143 个
-        #   instance_role="primary" 被它拆成 primary 44 / source 98 / mgr_primary 1 ——
-        #   MGR 主库和普通异步主库的运维动作不一样)和 is_rac(227 个节点里 14 个为真)。
-        #   第二版把名单补齐到 12 个,**但那仍然是白名单**:平台哪天加第 13 个键,
-        #   它照样被丢,而且用例里的 `set(node)` 取自测试夹具、不是平台产出,所以**测试照样绿**。
-        #   白名单的问题测试补不上,只能靠结构:默认全带过来,只显式改写我自己算出来的那两个。
-        #   丢掉 id 是因为 ref 就是它(边上引用的就是这个值),留着只会让人以为是两个东西。
-        out = {"ref": ref, "external": bool(node.get("external"))}
-        out.update({k: v for k, v in node.items() if k not in ("id", "ref", "external")})
-        return out
-
-    focus = _resolve_instance_id(args)
-    rows = []
-    for e in edges:
-        # 同样是透传:边上除了 from/to(要换成解析后的对象)以外的字段一律原样带过去。
-        # `resolved_by`(平台标"这条边是靠地址猜的")第一版就是这么丢掉的 —— 平台标 2 条、
-        # 我这儿显示 0 条;那个标记存在的全部理由就是让人看得见。补进白名单只能挡住这一个,
-        # 透传才能挡住下一个。
-        row = {"kind": e.get("kind"), "sync_state": e.get("sync_state")}
-        row.update({k: v for k, v in e.items()
-                    if k not in ("from", "to", "kind", "sync_state")})
-        row["from"] = side(e.get("from"))
-        row["to"] = side(e.get("to"))
-        if focus is not None and focus not in (e.get("from"), e.get("to")):
-            continue
-        if args.external_only and not (row["from"]["external"] or row["to"]["external"]):
-            continue
-        rows.append(row)
-
-    ext_edges = sum(1 for e in edges
-                    if str(e.get("from")).startswith("ext:") or str(e.get("to")).startswith("ext:"))
-    out: dict[str, Any] = {
-        # 键名用 items 而不是 edges:_envelope 只认那几个集合键,叫别的名字会让
-        # --fields / --group-by / --sort-by / --count-only / --format table **全部静默失效**。
-        # 描述性更强的名字换来的是一堆不工作的旗标 —— 不划算。
-        "items": rows,
-        "item_kind": "replication_edge",
-        "focus_instance_id": focus,
-        "coverage": {
-            "edges_total": len(edges),
-            "edges_touching_unmanaged": ext_edges,
-            "nodes_total": len(nodes),
-            "nodes_unmanaged": sum(1 for n in nodes.values() if n.get("external")),
-            "note": (
-                "复制关系里带 ext: 的一端是**未纳管**主机。/clusters 结构上只能显示纳管成员,"
-                "所以复制链上有外部主机时,用它回答「主备是谁」会给出一个**残缺但看起来完整**的答案 —— "
-                "这里的 edges_touching_unmanaged 就是它看不见的部分。反过来的情况也有:MGR 组复制"
-                "在平台 3.80 之前不画边,MGR 实例带 cluster_id 却没有边时,成员与角色看 /clusters/{id}/members。"
-            ),
-        },
-    }
-    if focus is not None and not rows:
-        # 空结果要说清是哪一种空。
-        focus_node = nodes.get(focus) or {}
-        cluster_id = focus_node.get("cluster_id")
-        if cluster_id is not None:
-            # 它在集群里:成员与角色在集群那边,别把人引到"查不到主备"。但没有边的**原因**因集群
-            # 类型而异,套错了会让 agent 把原因说错(复查:MGR 那句一度被套到 RAC、DG 备库上)。
-            detail = str(focus_node.get("role_detail") or "").lower()
-            coarse = str(focus_node.get("instance_role") or "").lower()
-            # 两个字段都看:DG 备库常是 instance_role=physical_standby、role_detail=active_dg ——
-            # 只看 role_detail 会把它漏进通用分支(复查时生产上的一台 DG 备库就是这样)。
-            is_mirror = (not detail.startswith("mgr_")) and (
-                any(t in coarse for t in ("standby", "replica"))
-                or any(t in detail for t in ("standby", "replica", "dg"))
-            )
-            if is_mirror:
-                why = "它和主库之间的复制关系没有上报到拓扑(拓扑只画各实例自己上报的主从信息)。"
-            elif detail.startswith("mgr_"):
-                why = "MGR 组复制在平台 3.80 之前不画边。"
-            elif focus_node.get("is_rac"):
-                why = "RAC 节点共享同一个库,节点之间本来就没有复制边。"
-            else:
-                why = "它的主从关系没有上报到拓扑(拓扑只画各实例自己上报的主从信息)。"
-            out["note"] = (
-                "实例 %s 在拓扑里没有复制边,但它属于集群 %s:%s成员与角色见 get /clusters/%s/members;"
-                "复制链上若还有未纳管的主机,那里也看不到。" % (focus, cluster_id, why, cluster_id)
-            )
-            out["cluster_id"] = cluster_id
-        else:
-            out["note"] = (
-                "实例 %s 在拓扑里没有任何复制边。★ 这有两种含义,而它们长得一样:"
-                "「它确实是单机」,或者「复制关系没被发现」——拓扑是从各实例自己上报的主从信息推的,"
-                "一端不上报就整条边都看不到。**不要据此断言它没有备库。**" % focus
-            )
-    return out
+    return _inventory.cmd_topology(args, globals())
 
 
 def cmd_metric_series(args: argparse.Namespace) -> Any:
-    """一个指标的走势。`latest` 只给一个点,而"它一直这样还是刚变的"要靠曲线回答。
-
-    ★ 24 小时是一道**硬边界**:窗口一旦超过它就改从汇总表取数,而**云采集的指标从不写汇总表**
-    (见平台 v3.64.x)。所以对云 RDS 实例问 48 小时的 `threads_running`,平台会返回 422 而不是
-    一个空数组 —— 那个 422 是答案的一部分,不是调用失败。这里原样透出它,并把粒度切换点讲清楚。
-    """
-    instance_id = _resolve_instance_id(args)
-    if instance_id is None:
-        _fail("missing_instance", "metric-series needs --instance-id N, or --ip/--host.",
-              exit_code=2)
-    payload = _try_get(
-        f"/metrics/{instance_id}/series",
-        _clean_params({"metric_name": args.metric_name, "hours": args.hours,
-                       "granularity": args.granularity}),
-    )
-    if _unavailable(payload):
-        if _LAST_HTTP_STATUS != 422:
-            _fail("http_error",
-                  "GET /metrics/%s/series returned HTTP %s" % (instance_id, _LAST_HTTP_STATUS),
-                  status_code=_LAST_HTTP_STATUS)
-        # ★ 这里的 422 **是答案的一部分**,不是调用失败:平台在说「这个指标没有该粒度的汇总,
-        # 所以这个窗口什么都给不出」——而那正是提问者需要知道的。塞进 http_error 里等于把
-        # 答案降级成报错,读的人会以为是自己调错了。
-        try:
-            body = json.loads(_LAST_HTTP_BODY or "{}")
-        except ValueError:
-            body = {}
-        reason = body.get("message") or body.get("detail") or (_LAST_HTTP_BODY or "")[:400]
-        out = {
-            "instance_id": instance_id,
-            # ★ 集合键必须和成功路径**同名**。上一轮把成功路径从 points 改成 items,
-            # 这条 422 路径没跟着改,于是同一条命令返回两种形状:调用方写 out["items"],
-            # 正常时拿到数据,一遇到 422 就 KeyError 或静默拿不到。
-            # SKILL.md 自己写着「集合可能落在 items / rows / ... 猜错就是运行时崩溃」——
-            # 结果同一条命令自己就给了两种。item_kind 也一并给出,让空集合仍能自证是什么的空集合。
-            "items": [],
-            "item_kind": "metric_point",
-            "unavailable": True,
-            "reason": reason,
-        }
-        # ★ 只在平台**确实**在说"没有汇总"时才给那条建议。
-        # 这个端点的 422 不止一种来源:hours 超过 720 是参数校验,granularity=raw 配大窗口
-        # 是另一条拒绝——对它们说"用 --hours 24 拿原始点"是**错的建议**,而错的建议比没有建议
-        # 更贵。第一版就是无条件加,等于我自己种下了今天一直在修的那类问题:回答了,但把人带偏。
-        # 匹配不上时**不加提示**:平台那两条消息本身已经自解释,让它原样过去。
-        if "aggregates" in reason:
-            out["hint"] = (
-                "窗口超过 24 小时会切到汇总表,而云采集的指标从不写汇总表(平台 v3.64.x)。"
-                "用 --hours 24 拿原始点,或换一个有汇总的指标。"
-                "★ 这不是调用失败,是这个问题在这个窗口上没有答案。"
-            )
-        return out
-    if not isinstance(payload, list):
-        return payload
-    granularities = sorted({r.get("granularity") for r in payload if isinstance(r, dict)})
-    names = sorted({r.get("metric_name") for r in payload if isinstance(r, dict)})
-    values = [r.get("value") for r in payload
-              if isinstance(r, dict) and isinstance(r.get("value"), (int, float))]
-    out: dict[str, Any] = {
-        "instance_id": instance_id,
-        # ★ 键名用 items。第一版叫 `points`(更贴切),结果 --fields / --group-by / --sort-by /
-        # --format table **四个旗标全部失效** —— 而"看趋势"恰恰最需要
-        # `--fields collected_at,value --format table`。同一个教训我在隔壁的 topology 上写进了
-        # 注释,又在这条命令里犯了一遍:贴切的名字换来一堆不工作的旗标,不划算。
-        "items": payload,
-        "item_kind": "metric_point",
-        "summary": {
-            "points": len(payload),
-            "metrics": names,
-            "granularity": granularities,
-            "first_at": payload[0].get("collected_at") if payload else None,
-            "last_at": payload[-1].get("collected_at") if payload else None,
-        },
-    }
-    if values:
-        out["summary"].update({"min": min(values), "max": max(values),
-                               "first": values[0], "last": values[-1]})
-    # 平台在点上标了 deprecated,而基于一个已废弃的指标做趋势判断,值得先知道这件事。
-    # 不提的话,"数据齐全"和"数据齐全但这个指标已经不该用了"读起来一样。
-    # ★ 点名是哪几个,不要只给一个布尔。不带 --metric-name 时这条命令会一次返回**多个指标**
-    # (生产 inst19 实测 21 个),而第一版的提示写的是"**这个**指标已废弃":既指向不明,
-    # 又读起来像这 21 个全废弃了。`deprecated` 是平台的**读时属性**(按 instance_type +
-    # metric_name 从静态描述表算出,不存在点上),所以同名指标的每一行取值必然相同,
-    # 按 metric_name 归拢即可点名。
-    deprecated_names = sorted({r.get("metric_name") for r in payload
-                               if isinstance(r, dict) and r.get("deprecated")})
-    if deprecated_names:
-        out["summary"]["deprecated"] = True
-        out["summary"]["deprecated_metrics"] = deprecated_names
-        out["summary"]["deprecated_note"] = (
-            "平台把这 %d 个指标标记为 deprecated:%s —— 趋势本身是真的,"
-            "但先确认它们还是不是你要看的那个指标。%s"
-            % (len(deprecated_names), "、".join(deprecated_names),
-               "(本次返回的另外 %d 个指标不受影响。)" % (len(names) - len(deprecated_names))
-               if len(names) > len(deprecated_names) else "")
-        )
-    if args.metric_name and not payload:
-        # ★ 同一个形状的第三次(alerts --severity nosuch → capacity-forecast --metric-name →
-        # 这里):拼错的指标名和"指标存在但窗口内无样本"返回**完全一样**的空。
-        # 而这个 helper 存在的理由,正是平台那句 "an empty list here would read as
-        # 'not collected' or 'flat', which is the opposite of the truth" —— threads_running
-        # 走 422 时被照顾得很好,拼错名字走空结果时一句话都没有。
-        # 词表离一次 /metrics/{id}/latest 只有一步,拿来把两种空分开。
-        latest = _try_get(f"/metrics/{instance_id}/latest")
-        known = sorted({r.get("metric_name") for r in latest
-                        if isinstance(r, dict) and r.get("metric_name")}) \
-            if isinstance(latest, list) else []
-        if not known:
-            # ★ 三个分支,不是两个。第一版只写了后两个,于是**词表取不到时静默落回原样** ——
-            # 和修复前那个不区分的空一模一样。我在修"unknown 被当成 ok"的过程中,
-            # 自己又造了一个 unknown 被当成 ok。
-            # 触发时机还特别不巧:这次额外调用**只在空结果时发出**,也就是有人正在逐个试
-            # 指标名的时候 —— 恰恰是最容易撞限流的场景。
-            # fail-safe 的方向是"说我不知道",不是"回到不区分"。
-            out["unavailable"] = True
-            if _unavailable(latest):
-                out["reason"] = (
-                    "空结果无法归类:取这台实例的指标词表失败(HTTP %s),所以分不清 '%s' 是"
-                    "名字拼错了,还是这个指标确实在窗口内没有样本。**重试一次通常就能分清。**"
-                    % (_LAST_HTTP_STATUS, args.metric_name)
-                )
-            else:
-                # 词表本身是空的 —— 那不是"查不到",是"这台一个指标都没采到"。
-                # 和上面那种混成一句话,会让人去重试一个重试不好的问题。
-                out["reason"] = (
-                    "这台实例**一个指标都没有**(/latest 返回空),所以 '%s' 查不到并不说明"
-                    "名字有没有拼错 —— 先查这台的采集是不是停了。" % args.metric_name
-                )
-        elif args.metric_name not in known:
-            out["unavailable"] = True
-            out["reason"] = (
-                "'%s' 不在这台实例的指标词表里(它有 %d 个指标)。空结果在这里有两种含义,"
-                "而它们长得一样:名字拼错了,或者这个指标确实在窗口内没有样本 —— 这是前者。"
-                % (args.metric_name, len(known))
-            )
-            out["known_metrics"] = known
-        else:
-            out["summary"]["note"] = (
-                "'%s' 在这台的指标词表里,但所选窗口内没有样本 —— 是**这段时间没有数据**,"
-                "不是这个指标没在采。" % args.metric_name
-            )
-    if granularities and granularities != ["raw"]:
-        # ★ "取到的是汇总"有**两个**原因,而第一版只写了其中一个:
-        #   (a) 窗口超过 24 小时 —— auto 自己切的
-        #   (b) 调用方自己指定了 --granularity —— 窗口可能只有 12 小时
-        # 对 (b) 说"窗口超过 24 小时"是**假话**,而且后半句也跟着错:那种情况下云指标在这个
-        # 窗口里恰恰是**查得到**的(raw 还在)。数据是对的,解释是错的,而错误的解释会让人
-        # 去缩窗口 —— 一个不是原因的东西。
-        # 这和我上一轮在 422 的 hint 上修的是同一个形状("错的建议比没有建议更贵"),
-        # 只是载体换成了 note。
-        if args.granularity and args.granularity != "auto":
-            out["summary"]["note"] = (
-                "取的是**汇总**而非原始点,因为你指定了 --granularity %s(不是因为窗口大小)。"
-                "value 是该桶的均值,另有 min/max。想要原始点用 --granularity raw 或 auto"
-                "(auto 在 ≤24 小时内给 raw)。" % args.granularity
-            )
-        else:
-            out["summary"]["note"] = (
-                "窗口超过 24 小时,auto 因此取了**汇总**而非原始点(value 是该桶的均值,"
-                "另有 min/max)。云采集的指标没有汇总,所以它们在这个窗口里查不到 —— "
-                "平台会用 422 说明,不是空数组。"
-            )
-    return out
+    return _diagnostics.cmd_metric_series(args, globals())
 
 
 def cmd_get(args: argparse.Namespace) -> Any:
-    """Read any catalogue path, tolerating the /dba prefix being present or absent.
-
-    The catalogue mixes both: freshness lives under /dba/instances/{id}/freshness while the
-    instance detail is the bare /instances/{id}. Getting it wrong returns a 404 that reads
-    like "this instance does not exist" rather than "you used the wrong prefix", so the
-    alternative is tried once before reporting failure.
-    """
-    path = _normalize_read_path(args.path)
-    params = _parse_kv_params(args.param)
-    try:
-        return _request("GET", path, params=params)
-    except SystemExit:
-        if _LAST_HTTP_STATUS != 404:
-            raise
-        alternative = path[len("/dba"):] if path.startswith("/dba/") else "/dba" + path
-        if alternative == path:
-            raise
-        try:
-            payload = _request("GET", alternative, params=params)
-        except SystemExit:
-            raise SystemExit(1) from None
-        sys.stderr.write(
-            json.dumps(
-                {"warning": "path_prefix_corrected", "requested": path, "used": alternative},
-                ensure_ascii=False,
-            )
-            + "\n"
-        )
-        return payload
+    return _core.cmd_get(args, globals())
 
 
 def cmd_probe_run(args: argparse.Namespace) -> Any:
-    if args.sql:
-        _fail(
-            "free_form_sql_not_supported",
-            "probe-run only accepts a whitelisted probe name + bound params; free-form SQL is not supported",
-            exit_code=2,
-        )
-    params: dict[str, Any] = {}
-    if args.sql_id:
-        params["sql_id"] = args.sql_id
-    if args.session_id is not None:
-        params["session_id"] = args.session_id
-    if args.object_name:
-        params["object_name"] = args.object_name
-    body: dict[str, Any] = {"probe": args.probe}
-    if params:
-        body["params"] = params
-    return _request("POST", f"/instances/{args.instance_id}/diagnostics/probe", body=body)
+    return _diagnostics.cmd_probe_run(args, globals())
 
 
 def cmd_business_inference_evidence(args: argparse.Namespace) -> Any:
-    database_id = getattr(args, "database_id", None)
-    database_name = getattr(args, "database", None)
-    instance_id = getattr(args, "instance_id", None)
-    if database_id is None:
-        if instance_id is None or not database_name:
-            _fail(
-                "missing_database",
-                "business-inference-evidence needs --database-id N, or both --instance-id N and --database NAME",
-                exit_code=2,
-            )
-        matches = _request(
-            "GET",
-            "/dba/databases/search",
-            params={
-                "q": database_name,
-                "instance_id": instance_id,
-                "status": "active",
-                "include_system_dbs": False,
-                "limit": 100,
-                "offset": 0,
-            },
-        )
-        candidates = matches.get("items") if isinstance(matches, dict) else None
-        exact = [
-            row for row in (candidates if isinstance(candidates, list) else [])
-            if isinstance(row, dict)
-            and str(row.get("database_name") or "").lower() == str(database_name).lower()
-            and int(row.get("instance_id") or -1) == int(instance_id)
-        ]
-        if len(exact) != 1:
-            _fail(
-                "database_not_uniquely_resolved",
-                "The instance/database pair did not resolve to exactly one active, non-system database; use --database-id.",
-                exit_code=2,
-            )
-        database_id = int(exact[0]["database_id"])
-
-    # This command intentionally bypasses the live-probe API. It reads the platform snapshot
-    # and follows every page so an external model gets the stored catalogue, not an arbitrary
-    # alphabetical first page. No request made here can connect to the source database.
-    path = f"/dba/metadata/databases/{database_id}/objects"
-    payload = _fetch_all("GET", path, {"limit": 500, "offset": 0})
-    _warn_if_truncated(payload, path)
-    rows = payload.get("items") if isinstance(payload, dict) else None
-    items = [
-        {
-            "schema_name": row.get("schema_name"),
-            "table_name": row.get("object_name"),
-            "object_type": row.get("object_type"),
-            "table_comment": row.get("object_comment"),
-        }
-        for row in (rows if isinstance(rows, list) else [])
-        if isinstance(row, dict)
-    ]
-    tables_with_comments = sum(
-        1 for row in items if str(row.get("table_comment") or "").strip()
-    )
-    status_value = str(payload.get("status") or "never_collected") if isinstance(payload, dict) else "never_collected"
-    completeness = payload.get("completeness") if isinstance(payload, dict) else None
-    available = status_value not in {"never_collected", "failed", "archived"}
-    partial = completeness == "partial" or status_value == "partial" or bool(
-        payload.get("truncated") if isinstance(payload, dict) else False
-    )
-    limitations: list[dict[str, str]] = []
-    if not available:
-        limitations.append({
-            "code": "snapshot_unavailable",
-            "message": "No usable persisted metadata snapshot exists; do not infer a business from this response.",
-        })
-    elif not items:
-        limitations.append({
-            "code": "empty_metadata_snapshot",
-            "message": (
-                "The stored snapshot contains no objects. This is insufficient evidence, not proof that "
-                "the database has no business purpose; carry the probe note and do not infer."
-            ),
-        })
-    elif partial:
-        limitations.append({
-            "code": "partial_snapshot",
-            "message": (
-                "The latest collection was incomplete or this response could not retrieve every stored page; "
-                "missing objects may carry different business signals."
-            ),
-        })
-    if available and items and tables_with_comments == 0:
-        limitations.append({
-            "code": "no_table_comments",
-            "message": (
-                "No returned table has a comment, so any inference must rely on table names alone "
-                "and should be low-confidence unless several names independently agree."
-            ),
-        })
-    return {
-        "task": "infer_database_business",
-        "database_id": database_id,
-        "instance_id": instance_id,
-        "database_name": database_name,
-        "available": available,
-        "evidence_status": "unavailable" if not available else ("ready" if items else "insufficient"),
-        "snapshot_status": status_value,
-        "completeness": completeness,
-        "collected_at": payload.get("collected_at") if isinstance(payload, dict) else None,
-        "signal_quality": {
-            "tables_returned": len(items),
-            "tables_with_comments": tables_with_comments,
-            "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
-            "sample_scope": "unavailable" if not available else ("partial_snapshot" if partial else "complete"),
-            "confidence_ceiling": (
-                "none" if not items else ("medium" if partial or tables_with_comments == 0 else "high")
-            ),
-        },
-        "total": payload.get("total") if isinstance(payload, dict) else None,
-        "truncated": bool(payload.get("truncated")) if isinstance(payload, dict) else False,
-        "provenance": "persisted_metadata_directory",
-        "limitations": limitations,
-        "items": items,
-    }
+    return _metadata.cmd_business_inference_evidence(args, globals())
 
 
 def cmd_metadata_coverage(args: argparse.Namespace) -> Any:
-    _ = args
-    return _request("GET", "/dba/metadata/coverage")
+    return _metadata.cmd_metadata_coverage(args, globals())
 
 
 def cmd_database_objects(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        f"/dba/metadata/databases/{args.database_id}/objects",
-        params={"limit": args.limit, "offset": args.offset},
-    )
+    return _metadata.cmd_database_objects(args, globals())
 
 
 def cmd_database_object_changes(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        f"/dba/metadata/databases/{args.database_id}/changes",
-        params={"limit": args.limit, "offset": args.offset},
-    )
+    return _metadata.cmd_database_object_changes(args, globals())
 
 
 def cmd_search_database_objects(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/dba/metadata/objects/search",
-        params={
-            "name": args.name,
-            "match": args.match,
-            "instance_type": args.instance_type,
-            "object_type": args.object_type,
-            "limit": args.limit,
-            "offset": args.offset,
-        },
-    )
+    return _metadata.cmd_search_database_objects(args, globals())
 
 
 def cmd_refresh_database_metadata(args: argparse.Namespace) -> Any:
-    return _request("POST", f"/dba/metadata/databases/{args.database_id}/refresh")
+    return _metadata.cmd_refresh_database_metadata(args, globals())
 
 
 def cmd_metadata_refresh_status(args: argparse.Namespace) -> Any:
-    return _request("GET", f"/dba/metadata/refresh-runs/{args.run_id}")
+    return _metadata.cmd_metadata_refresh_status(args, globals())
 
 
 def cmd_propose_metadata_refresh(args: argparse.Namespace) -> Any:
-    return _request(
-        "POST", "/dba/actions",
-        body={
-            "action_type": "metadata_refresh",
-            "database_id": args.database_id,
-            "reason": args.reason,
-            "evidence_refs": args.evidence_ref or [],
-        },
-    )
+    return _metadata.cmd_propose_metadata_refresh(args, globals())
 
 
 def cmd_action_order_status(args: argparse.Namespace) -> Any:
-    return _request("GET", f"/dba/actions/{args.order_id}")
+    return _metadata.cmd_action_order_status(args, globals())
 
 
 def cmd_execute_action_order(args: argparse.Namespace) -> Any:
-    return _request("POST", f"/dba/actions/{args.order_id}/execute")
+    return _metadata.cmd_execute_action_order(args, globals())
 
 
 def cmd_verify_action_order(args: argparse.Namespace) -> Any:
-    return _request("POST", f"/dba/actions/{args.order_id}/verify")
+    return _metadata.cmd_verify_action_order(args, globals())
 
 
 def cmd_prometheus_query(args: argparse.Namespace) -> Any:
-    body: dict[str, Any] = {"query": args.query}
-    if args.url:
-        body["url"] = args.url
-    return _request("POST", f"/instances/{args.instance_id}/prometheus/query", body=body)
+    return _diagnostics.cmd_prometheus_query(args, globals())
 
 
 def cmd_kb_search(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/knowledge/entries",
-        params={
-            "q": args.q,
-            "keyword": args.keyword,
-            "db_type": args.db_type,
-            "rule_id": args.rule_id,
-            "sort": args.sort,
-            "limit": args.limit,
-            "offset": args.offset,
-        },
-    )
+    return _knowledge.cmd_kb_search(args, globals())
 
 
 def cmd_kb_incidents(args: argparse.Namespace) -> Any:
-    key = urllib.parse.quote(args.root_cause_key, safe="")
-    return _request(
-        "GET",
-        f"/knowledge/entries/{key}/incidents",
-        params={"db_type": args.db_type, "rule_id": args.rule_id, "limit": args.limit},
-    )
+    return _knowledge.cmd_kb_incidents(args, globals())
 
 
 def cmd_kb_doc_search(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/knowledge/documents/search",
-        params={"q": args.q, "limit": args.limit},
-    )
+    return _knowledge.cmd_kb_doc_search(args, globals())
 
 
 def cmd_elk_status(args: argparse.Namespace) -> Any:
-    return _request("GET", "/elk/status")
+    return _elk.cmd_elk_status(args, globals())
 
 
 def cmd_elk_coverage(args: argparse.Namespace) -> Any:
-    return _request("GET", "/elk/coverage")
+    return _elk.cmd_elk_coverage(args, globals())
 
 
 def cmd_elk_search(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/elk/search",
-        params={
-            "host_ip": args.host_ip,
-            "host_name": args.host_name,
-            "start": args.start,
-            "end": args.end,
-            "levels": args.levels,
-            "query_string": args.query_string,
-            "index": args.index,
-            "size": args.size,
-        },
-    )
+    return _elk.cmd_elk_search(args, globals())
 
 
 def cmd_cloud_rightsizing(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/cloud-rds/rightsizing",
-        params={
-            "window_days": args.window_days,
-            "cpu_max": args.cpu_max,
-            "mem_max": args.mem_max,
-            "vendor": args.vendor,
-        },
-    )
+    return _cost.cmd_cloud_rightsizing(args, globals())
 
 
 def cmd_cloud_monitoring_coverage(args: argparse.Namespace) -> Any:
-    return _request(
-        "GET",
-        "/dba/cloud-rds/monitoring-coverage",
-        params={
-            "vendor": args.vendor,
-            "coverage": "missing" if args.missing_only else args.coverage,
-            "tenant_id": args.tenant_id,
-            "limit": args.limit,
-            "offset": args.offset,
-        },
-    )
+    return _cost.cmd_cloud_monitoring_coverage(args, globals())
 
 
 def cmd_cloud_savings_realized(args: argparse.Namespace) -> Any:
-    """What was actually DONE about cost, not what could be.
-
-    ``cloud-rightsizing`` answers "how much could we save" (candidates). This answers "how much
-    did we save" (plans acted on) — two different questions that people ask with the same
-    sentence, 降本情况如何. Answering the second with the first over-reports by every candidate
-    nobody ever executed.
-
-    The two-stage split is the whole point and is easy to misread:
-      * ``downsized``  = the class changed. Observable today.
-      * ``verified``   = an invoice came in below the pre-change baseline. Real money.
-    Almost this fleet is 包年包月, and a subscription re-prices **only at renewal** — so a plan
-    sitting at ``downsized`` for months is not stalled, and ``verified_monthly_saving = ¥0`` is
-    not a broken pipeline. ``verification_note`` says which of those it is; it is lifted to the
-    top here rather than left in the payload, because without it "账单没降" reads as failure.
-    """
-    payload = _request(
-        "GET", "/cloud-rds/downsizing-plans",
-        params={"status": args.status, "sort": args.sort},
-    )
-    if not isinstance(payload, dict):
-        return payload
-    items = payload.get("items")
-    if not isinstance(items, list):
-        return payload
-    if args.pending_only:
-        items = [p for p in items if p.get("status") in ("adopted", "downsized")]
-    if args.drifted_only:
-        items = [p for p in items if p.get("drift_note")]
-    payload = {**payload, "items": items}
-    # A per-status roll-up beside the rows, so the first question ("how many are where")
-    # does not need a hand-written pass over the list.
-    by_status: dict[str, int] = {}
-    for plan in items:
-        key = str(plan.get("status") or "unknown")
-        by_status[key] = by_status.get(key, 0) + 1
-    payload["by_status"] = by_status
-    # Why the verified figure is what it is. A bare ¥0 and a broken verification chain look
-    # identical; these say which one you are looking at.
-    waiting: dict[str, int] = {}
-    for plan in items:
-        if plan.get("status") in ("adopted", "downsized"):
-            basis = str(plan.get("verification_basis") or "unknown")
-            waiting[basis] = waiting.get(basis, 0) + 1
-    if waiting:
-        payload["awaiting_verification_by_basis"] = waiting
-    drifted = [p for p in items if p.get("drift_note")]
-    if drifted:
-        # Drift = the live report has moved away from the snapshot a human approved. Shown,
-        # never auto-applied — but it must not stay buried in a per-row field either.
-        payload["drifted"] = [
-            {"id": p.get("id"), "instance_name": p.get("instance_name"),
-             "status": p.get("status"), "drift_note": p.get("drift_note")}
-            for p in drifted
-        ]
-    return payload
+    return _cost.cmd_cloud_savings_realized(args, globals())
 
 
 def cmd_cloud_cost_history(args: argparse.Namespace) -> Any:
-    """Billing history. **Aliyun only** — Huawei has no 5-year overview API, so this is not
-    the fleet's total spend, and reading it as such under-reports by every Huawei instance.
-
-    The endpoint itself takes no parameters (it returns the whole stored series), so the
-    windowing and the year-on-year comparison below are done here on the full payload rather
-    than pushed to the server. That is a deliberate limit, not an oversight: there is no
-    vendor dimension in this data at all, which is why there is no ``--vendor`` flag — one
-    would return Aliyun numbers under a Huawei label.
-    """
-    payload = _request("GET", "/cloud-rds/cost-history")
-    if not isinstance(payload, dict):
-        return payload
-    if "coverage" not in payload:
-        # 老平台(< v3.63.0)不报覆盖范围。这里补一句**已知的限制**,而不是让调用方以为
-        # 这是全舰队支出。刻意不写死 "aliyun_only":平台自己会算的那份才是权威,一旦它开始
-        # 返回 coverage,这段就让位——写死的文案是会过期的,而没人会记得回来改。
-        payload = {**payload, "coverage": {
-            "vendors_included": None,
-            "vendors_missing": None,
-            "note": "平台未返回覆盖范围(旧版本)。已知限制:华为没有 5 年账单总览接口,"
-                    "所以这份历史很可能不含华为支出——按全舰队解读会低估。",
-        }}
-    months = payload.get("months")
-    if isinstance(months, list) and (args.since_cycle or args.until_cycle):
-        lo, hi = args.since_cycle, args.until_cycle
-        kept = [m for m in months
-                if (not lo or str(m.get("cycle") or "") >= lo)
-                and (not hi or str(m.get("cycle") or "") <= hi)]
-        payload["months"] = kept
-        payload["months_filtered_by"] = {"since_cycle": lo, "until_cycle": hi,
-                                         "kept": len(kept), "of": len(months)}
-    if args.yoy:
-        # `months` still references the **unwindowed** series even after the filter above
-        # replaced payload["months"] — year coverage must not shrink just because the caller
-        # asked for a narrower monthly view.
-        payload["year_on_year"] = _year_on_year(
-            payload.get("years"), months if isinstance(months, list) else None
-        )
-        payload["year_on_year_basis"] = (
-            "pct/delta 按 **net_consumption = paid + coupon**(= 原价−折扣−舍入,按我们实际"
-            "谈到的价格消耗了多少)。gross_pct 是目录价口径,看不见折扣率的变化;"
-            "paid_pct 是现金口径,受代金券时机扭曲——券多的年份看着暴跌、券用尽的年份看着暴涨。"
-            "三者都给出但只有 pct 是趋势。"
-            "partial=true 的年份未满 12 个月;partial_reason 区分"
-            "series_start(数据起点,永不补齐)/ year_in_progress(会自己补齐)/ "
-            "**missing_months(中间年份缺月 = 账单数据缺口,要去查)**。"
-            "★ 这种年份的 pct/delta 已改为**同月对同月**(pct_basis=same_months,"
-            "compared_months 列出是哪几个月),因为拿 9 个月比整年光月份数就有约 −25% 的"
-            "固定偏差、根本不是趋势;年合计对整年的那个数保留为 full_year_pct/full_year_delta,"
-            "它是事实但不能当趋势读。去年缺少对应月份时无法同月对比,标 pct_basis=unequal_months。"
-        )
-    return payload
+    return _cost.cmd_cloud_cost_history(args, globals())
 
 
 def _year_on_year(years: Any, months: Any = None) -> Any:
-    """Δ vs the previous year, per year. Hand-computing this was the most repeated follow-up
-    to this command.
-
-    ``pct`` follows **net consumption = paid + coupon**, which is 原价 − 折扣 − 舍入: what the
-    fleet consumed at the prices we actually negotiated.
-
-    Neither of the two obvious candidates is right on its own:
-
-    * ``paid`` is already net of vouchers, so a year that burns a large coupon balance reads as
-      a collapse and the year the coupons run out reads as a surge. Production 2025: paid
-      −67.1% while consumption barely moved.
-    * ``gross`` is **list price**, before contract discount, so it calls a better-negotiated
-      rate "no change". Production 2025: gross +0.5% while net consumption fell 5.7% — the
-      effective discount had moved from 47.8% to 44.9%, and gross cannot see that.
-
-    Net consumption is immune to both: vouchers cancel out (they are inside it), and the
-    contract discount is already applied. ``gross_pct`` and ``paid_pct`` are reported beside
-    it, separately named, because "what was the list price trend" and "what did we pay in
-    cash" are both real questions — they are just not *the* trend.
-
-    A year still in progress is marked ``partial`` with its ``months_covered``. Comparing 8
-    months against 12 is not a −33% trend, and the caller cannot see the month count from the
-    yearly totals alone. Coverage is counted from the **unwindowed** month series, so
-    ``--since-cycle`` / ``--until-cycle`` narrow the monthly rows without silently turning
-    every year in the window into a fake "partial".
-    """
-    if not isinstance(years, list):
-        return None
-    # 每年出现过哪几个**月份号**,而不只是数量 —— 数量分不出「8-12 连续」和「8,9,11,12 有洞」,
-    # 而后者才是真正的账单缺口。
-    seen: dict[str, set[int]] = {}
-    # 同月对同月要用到逐月净额 —— 不满 12 个月的年份,拿年合计比整年得到的不是趋势。
-    monthly_net: dict[str, dict[int, float]] = {}
-    # gross / paid 也要逐月:同月对比必须**三组一起**做,否则同一行里混着两种口径。
-    monthly_gross: dict[str, dict[int, float]] = {}
-    monthly_paid: dict[str, dict[int, float]] = {}
-    have_months = isinstance(months, list) and bool(months)
-    if have_months:
-        for m in months:
-            if isinstance(m, dict):
-                cycle = str(m.get("cycle") or "")
-                if len(cycle) >= 7 and cycle[4] == "-" and cycle[5:7].isdigit():
-                    y, mm = cycle[:4], int(cycle[5:7])
-                    seen.setdefault(y, set()).add(mm)
-                    paid, coupon, gross_m = m.get("paid"), m.get("coupon"), m.get("gross")
-                    if isinstance(paid, (int, float)):
-                        monthly_net.setdefault(y, {})[mm] = paid + (
-                            coupon if isinstance(coupon, (int, float)) else 0.0)
-                        monthly_paid.setdefault(y, {})[mm] = paid
-                    if isinstance(gross_m, (int, float)):
-                        monthly_gross.setdefault(y, {})[mm] = gross_m
-
-    def _coverage(year: str) -> tuple[int, str | None]:
-        """(月数, partial 的原因)。原因为 None 表示这一年是完整的。
-
-        判据是**上下界分别解释**,不是两条各管一头的规则。前一版写成「当前年且从 1 月起」和
-        「起点年且到 12 月止」两条,当一年**同时是**起点年和当前年时(今年年中才接入的部署,
-        在它的第一个自然年内)——它既到不了 12 月、也不从 1 月起,两条都不命中,于是掉进兜底
-        的 missing_months,把一个完全正常的新部署报成账单缺口。本项目自己就差点是这个形状:
-        数据起点 2021-08。
-
-        所以改成分别问两个问题:**缺的那段月份,有没有一个不是缺口的解释?**
-          * 下界:从 1 月起,或者这就是序列的起点年(之前本来就没有数据)
-          * 上界:到 12 月止,或者这就是当前年(年还没过完,之后本来就还没发生)
-        两头都有解释才不是缺口;任何一头解释不了,就是真的少了账期。
-
-        ★ ``seen.get(year, set())`` 取的是**空集**而不是 None:years 里有某年、months 里
-        一个月都没有 —— 那是最极端的账单缺口,而它曾经是唯一连 partial 都不标的一种,
-        读起来跟"完整"一模一样。
-        """
-        got = seen.get(year, set())
-        n = len(got)
-        if n >= 12:
-            return n, None
-        if not got:
-            return 0, "missing_months"              # 整年缺失
-        lo, hi = min(got), max(got)
-        if hi - lo + 1 != n:
-            return n, "missing_months"              # 中间有洞,与是不是首/末年无关
-        is_first, is_now = year == earliest, year == current_year
-        lo_ok = lo == 1 or is_first                 # 序列就从这儿开始,之前不算"缺"
-        # ★ 当前年的上界必须和**现在到哪个月了**比,不能只凭"是今年"就放行。
-        # 写成 `hi == 12 or is_now` 时,is_now 是一张无条件通行证:今年的账单从 3 月起就断了,
-        # 缺了 4–9 月,照样被说成"年还没过完"—— 真缺口被吸收成正常在途,而这正是本项目
-        # 最贵的那类错。留一个月余量:当月账期可能还没出账(本部署 09-08 就已有 2026-09,
-        # 出账很快;慢的凭据需要这一格)。
-        hi_ok = hi == 12 or (is_now and hi >= current_month - 1)
-        if lo_ok and hi_ok:
-            # ★ 按**实际用到了哪条放宽**贴标签,不按"哪个标志为真"。
-            # 一个只有 2026 一年的序列,它既是 earliest 也是 current_year,但如果它从 1 月起,
-            # 下界压根不需要"起点年"这条豁免 —— 标成 series_start_in_progress 就是在说
-            # "早于起点的月份永不补齐",而它根本没有更早的月份。这是同一个洞的第三次:
-            # 前两次是两条规则各管一头留下缝隙,这次是标签读的是标志而不是理由。
-            used_start = lo != 1        # 下界靠"这是序列起点年"才成立
-            used_progress = hi != 12    # 上界靠"今年还没过完"才成立
-            if used_start and used_progress:
-                return n, "series_start_in_progress"
-            return n, "year_in_progress" if used_progress else "series_start"
-        # 账单是滞后出账的:跨年那几周,去年合法地还缺 12 月。仍然标 partial(不隐藏),
-        # 但给它自己的名字 —— 报成 missing_months 会让人每年年初白查一趟。
-        # 只对**当前年的前一年、只差 12 月、且现在还在 1–2 月**放行,窗口刻意开得很窄。
-        try:
-            prev_year = int(current_year) - 1 == int(year)
-        except (TypeError, ValueError):
-            prev_year = False
-        # ★ 这里用 lo_ok 而不是 lo == 1:年中接入的部署永远满足不了 lo == 1,于是它的
-        # "去年"每逢年初都会被报成缺口 —— 和 FP-1 同一个洞(又一条规则默认序列从 1 月起)。
-        if prev_year and lo_ok and hi == 11 and current_month <= 2:
-            return n, "awaiting_final_cycle"
-        return n, "missing_months"                  # 有一头解释不了 = 真的少了账期
-    # ★ 按年份**排序**再算,不依赖服务端的返回顺序。位置式的 [0]/[-1] 在倒序返回时会把
-    # series_start 和 year_in_progress 直接对调 —— 两个都错、方向相反、都是误导;而 prev_*
-    # 的累加同样依赖顺序,倒序会让整个同比失真。对客户端不控制的数据做无防御的顺序假设,
-    # 是这一整类缺陷的共同根子。
-    years = sorted(
-        [r for r in years if isinstance(r, dict)],
-        key=lambda r: str(r.get("year") or ""),
-    )
-    known_years = [str(r.get("year")) for r in years]
-    earliest = min(known_years) if known_years else None
-    _now = datetime.now()
-    current_year, current_month = str(_now.year), _now.month
-
-    def _pct(cur: Any, prev: Any) -> tuple[Any, Any]:
-        if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)):
-            return None, None
-        # 上一年为 0 时同比无定义 —— 报 None 而不是 0%,后者读起来像"没变化"。
-        return round(cur - prev, 2), (round((cur - prev) / prev * 100, 1) if prev else None)
-
-    out = []
-    prev_gross = prev_paid = prev_net = None
-    for row in years:
-        if not isinstance(row, dict):
-            continue
-        year = str(row.get("year"))
-        gross, paid, coupon = row.get("gross"), row.get("paid"), row.get("coupon")
-        net = (paid + coupon) if isinstance(paid, (int, float)) and isinstance(coupon, (int, float)) else paid
-        entry = {"year": row.get("year"), "gross": gross, "paid": paid, "coupon": coupon,
-                 "net_consumption": round(net, 2) if isinstance(net, (int, float)) else None}
-        if have_months:
-            n, reason = _coverage(year)
-            entry["months_covered"] = n
-            if reason:
-                entry["partial"] = True
-                entry["partial_reason"] = reason
-        else:
-            # 没有月度序列就**无法**判断完整性。此前这种情况下整个 partial 机制静默消失,
-            # 每一年都读起来像完整的 —— "查不了"和"没问题"必须是两种可见的答案。
-            entry["coverage_unknown"] = True
-            entry["coverage_unknown_reason"] = (
-                "响应里没有 months 序列,无法判断该年是否满 12 个月;partial 未作判定"
-            )
-        entry["delta"], entry["pct"] = _pct(net, prev_net)
-        entry["gross_delta"], entry["gross_pct"] = _pct(gross, prev_gross)
-        entry["paid_delta"], entry["paid_pct"] = _pct(paid, prev_paid)
-        entry["pct_basis"] = "full_year"
-        # ★ 不满 12 个月的年份,年合计比整年**根本不是趋势** —— 光月份数就带来固定偏差
-        #   (9 比 12,持平的一年也会显示 −25%)。这个 docstring 上面自己写着,而代码照样
-        #   算了那个数、只在旁边挂一句 partial 的告诫 —— 又是"注释比实现更正确"。
-        #   而这件事有确切答案:拿去年**同样这几个月**比。能算准的问题不该留给读者去折算。
-        #   原来那个整年数不丢,改名 full_year_*:它是事实,只是不能当趋势读。
-        if entry.get("partial") and have_months:
-            cur_months = seen.get(year) or set()
-            try:
-                prev_y = str(int(year) - 1)
-            except (TypeError, ValueError):
-                prev_y = ""
-            prev_have = seen.get(prev_y) or set()
-            if cur_months and cur_months <= prev_have:
-                cur_sum = sum(monthly_net.get(year, {}).get(mm, 0.0) for mm in cur_months)
-                prev_sum = sum(monthly_net.get(prev_y, {}).get(mm, 0.0) for mm in cur_months)
-                lfl_delta, lfl_pct = _pct(round(cur_sum, 2), round(prev_sum, 2))
-                entry["full_year_delta"], entry["full_year_pct"] = entry["delta"], entry["pct"]
-                entry["delta"], entry["pct"] = lfl_delta, lfl_pct
-                entry["pct_basis"] = "same_months"
-                entry["compared_months"] = sorted(cur_months)
-                # ★ 三组必须同一个口径。a348a32 只把 net 这组换成了同月,gross / paid 两组仍是
-                #   9 个月比 12 个月,pct_note 却一个字不提 —— 生产 2026:gross_pct 读作 −40.7%,
-                #   同月真值 −24.3%,差 16 个百分点(2026-09-14 测评 P0)。同一行里混两种口径比
-                #   全错更难发现:net 那个数是对的,读的人会默认旁边的也对。
-                missing_groups = []
-                for label, monthly in (("gross", monthly_gross), ("paid", monthly_paid)):
-                    entry["full_year_%s_delta" % label] = entry["%s_delta" % label]
-                    entry["full_year_%s_pct" % label] = entry["%s_pct" % label]
-                    cur_m, prev_m = monthly.get(year, {}), monthly.get(prev_y, {})
-                    if all(mm in cur_m and mm in prev_m for mm in cur_months):
-                        entry["%s_delta" % label], entry["%s_pct" % label] = _pct(
-                            round(sum(cur_m[mm] for mm in cur_months), 2),
-                            round(sum(prev_m[mm] for mm in cur_months), 2))
-                    else:
-                        # 缺逐月数据就算不出同月值 —— 置空并说出来,绝不悄悄留下整年那个数。
-                        entry["%s_delta" % label] = entry["%s_pct" % label] = None
-                        missing_groups.append(label)
-                entry["pct_note"] = (
-                    "本年只有 %d 个月,所以 pct/delta、gross_pct/gross_delta、paid_pct/paid_delta "
-                    "三组都是拿 %s 年**同样这几个月**比出来的。full_year_* 是年合计对整年,"
-                    "含 %d 个月的固定偏差,不能当趋势读。"
-                    % (len(cur_months), prev_y, 12 - len(cur_months))
-                )
-                if missing_groups:
-                    entry["pct_note"] += "(%s 缺逐月数据,无法同月对比,已置空)" % "、".join(missing_groups)
-            elif not prev_have:
-                # ★ 序列起点年:上一年**根本不存在**(0 个月),不是"缺了其中某些月份"。
-                #   说成缺月会让人去找一批不存在的账单 —— 诊断不同,动作也不同。
-                #   而这一行的 partial_reason 早就正确地写着 series_start:同一行里两个字段
-                #   给出矛盾的诊断,是我自己造的。生产第一行(2021)走的就是这条。
-                #   pct/delta 为 None 也要说清是哪一种 None:不是数据缺失,是没有可比对象。
-                entry["pct_basis"] = "no_prior_year"
-                entry["pct_note"] = (
-                    "序列从这一年开始(上一年在账单数据里一个月都没有),**没有可比的上一年** —— "
-                    "pct/delta 为 null 不是数据缺失,是这个问题在这一年没有答案。"
-                )
-            else:
-                # 上一年存在,但缺了本年有的某些月份 —— 这才是真的同月对不上。
-                entry["pct_basis"] = "unequal_months"
-                entry["missing_in_prior_year"] = sorted(cur_months - prev_have)
-                entry["pct_note"] = (
-                    "本年不满 12 个月,而上一年缺少其中的 %s 月,**无法同月对比**;"
-                    "这里的 pct、gross_pct、paid_pct 都是年合计对整年,含月份数差带来的固定偏差,不是趋势。"
-                    % "、".join(str(m) for m in sorted(cur_months - prev_have))
-                )
-        if isinstance(gross, (int, float)):
-            prev_gross = gross
-        if isinstance(paid, (int, float)):
-            prev_paid = paid
-        if isinstance(net, (int, float)):
-            prev_net = net
-        out.append(entry)
-    return out
+    return _cost._year_on_year(years, months, runtime=globals())
 
 
 def cmd_backups(args: argparse.Namespace) -> Any:
-    # Surfaces backup_method + determination (verified / declared_no_evidence / not_tracked /
-    # unknown) so the answer to "does this instance actually have a backup?" is explicit —
-    # expdp dumps are invisible to RMAN, so the raw status alone reads as a false "no backup".
-    return _request(
-        "GET",
-        f"/instances/{args.instance_id}/backups",
-        params={"refresh": args.refresh or None},
-    )
+    return _backups.cmd_backups(args, globals())
 
 
 def _add_global_output_flags(parser: argparse.ArgumentParser, *, suppress_defaults: bool = False) -> None:
@@ -3129,559 +1890,39 @@ _KB_DB_TYPES = ["oracle", "mysql", "postgres", "tidb", "clickhouse"]
 
 
 def _add_core_commands(sub) -> None:
-    """实例定位、目录与自检。"""
-    instance = sub.add_parser(
-        "instance",
-        help="Everything about one instance from an id or an IP: detail, freshness, backups, "
-             "database count/coverage, and active alerts — in one call.",
-    )
-    instance.add_argument("--instance-id", type=int)
-    instance.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    instance.add_argument("--ip")
-    instance.add_argument("--host")
-    instance.set_defaults(func=cmd_instance)
-
-    onboarding = sub.add_parser(
-        "onboarding-check",
-        help="Is a newly onboarded instance actually wired up? Checks database inventory, "
-             "declared backup method, ownership and ELK log coverage — metrics flowing says "
-             "nothing about any of them.",
-    )
-    onboarding.add_argument("--instance-id", type=int)
-    onboarding.set_defaults(_needs_instance=True)
-    onboarding.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    onboarding.set_defaults(func=cmd_onboarding_check)
-
-    resolve = sub.add_parser("resolve")
-    _common_filters(resolve)
-    resolve.add_argument("--host")
-    resolve.add_argument("--ip")
-    resolve.add_argument("--instance-name")
-    resolve.add_argument("--database-name")
-    resolve.add_argument("--alert-id", type=int)
-    resolve.add_argument("--limit", type=int)
-    resolve.set_defaults(func=cmd_resolve)
-
-    context = sub.add_parser("context")
-    context.add_argument("--alert-id", type=int)
-    context.add_argument("--instance-id", type=int)
-    context.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    context.add_argument("--database-id", type=int)
-    context.add_argument("--refresh-ai-context", action="store_true")
-    context.add_argument("--stale-after-hours", type=int)
-    context.set_defaults(func=cmd_context)
-
-    who = sub.add_parser(
-        "whoami",
-        help="Identity + expiry + rate limits + platform health — run this first when "
-             "something is not working",
-    )
-    who.set_defaults(func=cmd_whoami)
-
-    selfchk = sub.add_parser(
-        "self-check",
-        help="Platform cross-subsystem invariants — run before reporting anything as absent",
-    )
-    selfchk.add_argument("--violations-only", action="store_true",
-                         help="Return only the checks that are currently violated.")
-    selfchk.set_defaults(func=cmd_self_check)
-
-    classification = sub.add_parser("classification")
-    classification.add_argument("--limit", type=int)
-    classification.add_argument("--type", choices=["mysql", "postgres", "oracle", "tidb", "clickhouse"])
-    classification.add_argument(
-        "--topology",
-        help="Filter by topology kind: rac, dataguard, mysql_replication, mysql_group_replication, postgres_replication, tidb_cluster, clickhouse_cluster, replication, standalone",
-    )
-    classification.add_argument("--tenant-id")
-    classification.set_defaults(func=cmd_classification)
-
-    ai_endpoints = sub.add_parser(
-        "ai-endpoints",
-        help="List the self-describing catalog of model-reachable (ai-client) read endpoints.",
-    )
-    ai_endpoints.set_defaults(func=cmd_ai_endpoints)
-
-    get_cmd = sub.add_parser(
-        "get",
-        help="GET any model-reachable read path from the ai-endpoints catalog (drill-in).",
-    )
-    get_cmd.add_argument("path", help="Read path, e.g. /dashboard/trends or /api/v2/topology")
-    get_cmd.add_argument(
-        "--param",
-        action="append",
-        metavar="KEY=VALUE",
-        help="Query parameter (repeatable), e.g. --param hours=6",
-    )
-    get_cmd.set_defaults(func=cmd_get)
+    return _core._add_core_commands(sub, globals())
 
 
 def _add_alert_commands(sub) -> None:
-    """告警。"""
-    alert_evidence = sub.add_parser("alert-evidence")
-    alert_evidence.add_argument("--alert-id", type=int, required=True)
-    alert_evidence.add_argument("--before-hours", type=int)
-    alert_evidence.add_argument("--after-hours", type=int)
-    alert_evidence.set_defaults(func=cmd_alert_evidence)
-
-    alerts_v2 = sub.add_parser(
-        "alerts",
-        help="Current alerts, flat, instance inlined (v3.32+; prefer over alerts-list)",
-    )
-    alerts_v2.add_argument("--status", default="active", choices=["active", "resolved", "all"])
-    alerts_v2.add_argument("--severity", choices=["low", "medium", "high", "critical"],
-                            help="Alert severity. Closed vocabulary — the response's own "
-                                 "`counts` enumerates it, so a typo must not come back as a 0.")
-    alerts_v2.add_argument("--instance-id", type=int)
-    alerts_v2.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    alerts_v2.add_argument("--limit", type=_positive_int, default=200)
-    alerts_v2.set_defaults(func=cmd_alerts)
-
-    alerts = sub.add_parser("alerts-list")
-    alerts.add_argument("--status", default="active")
-    alerts.add_argument("--all-statuses", action="store_true")
-    alerts.add_argument("--severity", choices=["low", "medium", "high", "critical"],
-                            help="Alert severity. Closed vocabulary — the response's own "
-                                 "`counts` enumerates it, so a typo must not come back as a 0.")
-    alerts.add_argument("--tenant-id")
-    alerts.add_argument("--instance-id", type=int)
-    alerts.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    alerts.add_argument("--page", type=_positive_int, default=1)
-    alerts.add_argument("--page-size", type=_positive_int, default=20)
-    alerts.add_argument("--start-time")
-    alerts.add_argument("--end-time")
-    alerts.set_defaults(func=cmd_alerts_list)
-
-    silr = sub.add_parser(
-        "silence-report",
-        help="Why an instance might not be alerting: all 5 mechanisms (v3.32+)",
-    )
-    silr.add_argument("--instance-id", type=int)
-    silr.set_defaults(_needs_instance=True)
-    silr.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    silr.set_defaults(func=cmd_silence_report)
+    return _alerts._add_alert_commands(sub, globals())
 
 
 def _add_backup_commands(sub) -> None:
-    """备份。"""
-    bcov = sub.add_parser(
-        "backups-coverage",
-        help="Fleet backup coverage, both tracks (v3.32+); defaults to at_risk only",
-    )
-    bcov.add_argument("--verdict", default="at_risk",
-                      choices=["at_risk", "ok", "warning", "indeterminate",
-                               "remote_untracked", "not_applicable", "suppressed", "all"])
-    bcov.add_argument("--instance-type")
-    bcov.add_argument("--exclude-cloud", action="store_true",
-                      help="Drop vendor-managed cloud RDS rows (their backups are the provider's).")
-    bcov.add_argument("--cloud-vendor")
-    bcov.add_argument("--environment")
-    bcov.add_argument("--limit", type=_positive_int, default=500)
-    bcov.set_defaults(func=cmd_backups_coverage)
-
-    backups = sub.add_parser(
-        "backups",
-        help="One instance's backup status + evidence-based determination (has-backup verdict; v2.98+)",
-    )
-    backups.add_argument("--instance-id", type=int)
-    backups.set_defaults(_needs_instance=True)
-    backups.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    backups.add_argument(
-        "--refresh", action="store_true",
-        help="Force a live Oracle RMAN refresh (slow); default serves the stored daily-swept status",
-    )
-    backups.set_defaults(func=cmd_backups)
+    return _backups._add_backup_commands(sub, globals())
 
 
 def _add_inventory_commands(sub) -> None:
-    """库存、负责人与库发现。"""
-    inventory = sub.add_parser("inventory-summary")
-    _common_filters(inventory)
-    inventory.add_argument("--include-system-dbs", action="store_true")
-    inventory.add_argument("--stale-after-hours", type=int)
-    inventory.set_defaults(func=cmd_inventory_summary)
-
-    search = sub.add_parser("databases-search")
-    _common_filters(search)
-    search.add_argument("--status")
-    search.add_argument("--include-inactive", action="store_true")
-    search.add_argument("--include-system-dbs", action="store_true")
-    search.add_argument("--is-in-use", choices=["true", "false"])
-    search.add_argument("--limit", type=int)
-    search.add_argument("--offset", type=int)
-    search.set_defaults(func=cmd_databases_search)
-
-    unused = sub.add_parser("databases-unused")
-    _common_filters(unused)
-    unused.add_argument("--include-inactive", action="store_true")
-    unused.add_argument("--limit", type=int)
-    unused.set_defaults(func=cmd_databases_unused)
-
-    scope = sub.add_parser("ownership-scope")
-    scope.add_argument("--contact")
-    scope.add_argument("--contact-role", choices=["any", "application", "technical"])
-    scope.add_argument("--department")
-    scope.add_argument("--service-domain")
-    scope.add_argument("--business")
-    scope.add_argument("--tenant-id")
-    scope.add_argument("--include-inactive", action="store_true")
-    scope.add_argument("--include-system-dbs", action="store_true")
-    scope.add_argument("--stale-after-hours", type=int)
-    scope.set_defaults(func=cmd_ownership_scope)
-
-    directory = sub.add_parser("directory-options")
-    directory.add_argument("--type", choices=["contact", "department", "application"], required=True)
-    directory.add_argument("--search")
-    directory.add_argument("--include-inactive", action="store_true")
-    directory.add_argument("--limit", type=int)
-    directory.set_defaults(func=cmd_directory_options)
-
-    freshness = sub.add_parser("freshness")
-    freshness.add_argument("--instance-id", type=int)
-    freshness.set_defaults(_needs_instance=True)
-    freshness.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    freshness.add_argument("--stale-after-hours", type=int)
-    freshness.set_defaults(func=cmd_freshness)
-
-    sweeps = sub.add_parser(
-        "sweeps",
-        help="Nightly database-discovery sweep runs: what each one attempted, deferred and skipped (3.83.0+).",
-    )
-    sweeps.add_argument("--limit", type=int, help="Runs to return, newest first (server max 100).")
-    sweeps.set_defaults(func=cmd_sweeps)
-
-    timeline = sub.add_parser("timeline")
-    timeline.add_argument("--instance-id", type=int)
-    timeline.set_defaults(_needs_instance=True)
-    timeline.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    timeline.add_argument("--hours", type=int)
-    timeline.add_argument("--limit", type=int)
-    timeline.set_defaults(func=cmd_timeline)
+    return _inventory._add_inventory_commands(sub, globals())
 
 
 def _add_diagnostic_commands(sub) -> None:
-    """诊断探针与拓扑。"""
-    catalog = sub.add_parser("diagnostics-catalog")
-    catalog.add_argument("--instance-id", type=int)
-    catalog.set_defaults(_needs_instance=True)
-    catalog.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    catalog.set_defaults(func=cmd_diagnostics_catalog)
-
-    run = sub.add_parser("diagnostics-run")
-    run.add_argument("--instance-id", type=int)
-    run.set_defaults(_needs_instance=True)
-    run.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    run.add_argument("--checks", required=True)
-    run.add_argument("--timeout-seconds", type=int)
-    run.add_argument("--database-name")
-    run.add_argument("--sql", help=argparse.SUPPRESS)
-    run.set_defaults(func=cmd_diagnostics_run)
-
-    probe_catalog = sub.add_parser("probe-catalog")
-    probe_catalog.add_argument("--instance-id", type=int)
-    probe_catalog.set_defaults(_needs_instance=True)
-    probe_catalog.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    probe_catalog.set_defaults(func=cmd_probe_catalog)
-
-    probe_run = sub.add_parser("probe-run")
-    probe_run.add_argument("--instance-id", type=int)
-    probe_run.set_defaults(_needs_instance=True)
-    probe_run.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    probe_run.add_argument("--probe", required=True)
-    probe_run.add_argument("--sql-id")
-    probe_run.add_argument("--session-id", type=int)
-    probe_run.add_argument("--object-name")
-    probe_run.add_argument("--sql", help=argparse.SUPPRESS)
-    probe_run.set_defaults(func=cmd_probe_run)
-
-    business_inference = sub.add_parser(
-        "business-inference-evidence",
-        help="Read persisted object-name/comment evidence for a model to infer a database's likely business",
-    )
-    business_inference.add_argument("--database-id", type=int)
-    business_inference.add_argument("--instance-id", type=int)
-    business_inference.add_argument("--database")
-    business_inference.set_defaults(func=cmd_business_inference_evidence)
-
-    metadata_coverage = sub.add_parser(
-        "metadata-coverage",
-        help="Coverage and freshness of the persisted database-object directory",
-    )
-    metadata_coverage.set_defaults(func=cmd_metadata_coverage)
-
-    database_objects = sub.add_parser(
-        "database-objects",
-        help="Read one database's persisted object snapshot; never connects to the source database",
-    )
-    database_objects.add_argument("--database-id", type=int, required=True)
-    database_objects.add_argument("--limit", type=int, default=100)
-    database_objects.add_argument("--offset", type=int, default=0)
-    database_objects.set_defaults(func=cmd_database_objects)
-
-    database_changes = sub.add_parser(
-        "database-object-changes",
-        help="Read recent persisted object additions, removals and definition/comment changes",
-    )
-    database_changes.add_argument("--database-id", type=int, required=True)
-    database_changes.add_argument("--limit", type=int, default=100)
-    database_changes.add_argument("--offset", type=int, default=0)
-    database_changes.set_defaults(func=cmd_database_object_changes)
-
-    search_objects = sub.add_parser(
-        "search-database-objects",
-        help="Search persisted object names across active, non-system databases",
-    )
-    search_objects.add_argument("--name", required=True)
-    search_objects.add_argument("--match", choices=["exact", "prefix"], default="exact")
-    search_objects.add_argument("--instance-type")
-    search_objects.add_argument("--object-type")
-    search_objects.add_argument("--limit", type=int, default=100)
-    search_objects.add_argument("--offset", type=int, default=0)
-    search_objects.set_defaults(func=cmd_search_database_objects)
-
-    refresh_metadata = sub.add_parser(
-        "refresh-database-metadata",
-        help="Admin-only: queue one bounded, load-gated metadata refresh",
-    )
-    refresh_metadata.add_argument("--database-id", type=int, required=True)
-    refresh_metadata.set_defaults(func=cmd_refresh_database_metadata)
-
-    refresh_status = sub.add_parser(
-        "metadata-refresh-status",
-        help="Read the status and completeness of one queued metadata refresh",
-    )
-    refresh_status.add_argument("--run-id", type=int, required=True)
-    refresh_status.set_defaults(func=cmd_metadata_refresh_status)
-
-    propose_action = sub.add_parser(
-        "propose-metadata-refresh",
-        help="AI client: propose one bounded metadata refresh for independent admin approval",
-    )
-    propose_action.add_argument("--database-id", type=int, required=True)
-    propose_action.add_argument("--reason", required=True)
-    propose_action.add_argument("--evidence-ref", action="append")
-    propose_action.set_defaults(func=cmd_propose_metadata_refresh)
-
-    action_status = sub.add_parser("action-order-status", help="Read one action order and its refresh status")
-    action_status.add_argument("--order-id", type=int, required=True)
-    action_status.set_defaults(func=cmd_action_order_status)
-
-    action_execute = sub.add_parser("execute-action-order", help="AI client: queue one independently approved order")
-    action_execute.add_argument("--order-id", type=int, required=True)
-    action_execute.set_defaults(func=cmd_execute_action_order)
-
-    action_verify = sub.add_parser("verify-action-order", help="AI client: persist server-side verification of a completed run")
-    action_verify.add_argument("--order-id", type=int, required=True)
-    action_verify.set_defaults(func=cmd_verify_action_order)
-
-    prometheus_query = sub.add_parser(
-        "prometheus-query",
-        help="Read-only instant PromQL against a TiDB instance's Prometheus (hotspots, "
-        "golden signals, per-store flow, metric-name verification). Read-only, SSRF-guarded.",
-    )
-    prometheus_query.add_argument("--instance-id", type=int)
-    prometheus_query.set_defaults(_needs_instance=True)
-    prometheus_query.add_argument(
-        "--instance-ids",
-        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
-    )
-    prometheus_query.add_argument("--query", required=True, help="a single instant PromQL expression")
-    prometheus_query.add_argument("--url", help="override Prometheus URL (defaults to saved extra.prometheus_url)")
-    prometheus_query.set_defaults(func=cmd_prometheus_query)
-
-    topo = sub.add_parser(
-        "topology",
-        help="复制拓扑:谁复制给谁,**含未纳管的外部主机**(/clusters 给不出这部分)",
-    )
-    topo.add_argument("--instance-id", type=int, help="只看这台相关的边")
-    topo.add_argument("--ip")
-    topo.add_argument("--host")
-    topo.add_argument("--external-only", action="store_true",
-                      help="只看一端是未纳管主机的边——那是 /clusters 完全看不见的部分。")
-    topo.set_defaults(func=cmd_topology)
+    return _diagnostics._add_diagnostic_commands(sub, globals())
 
 
 def _add_capacity_commands(sub) -> None:
-    """容量与指标。"""
-    capf = sub.add_parser(
-        "capacity-forecast",
-        help="Projected exhaustion incl. trends below the alert threshold (v3.32+)",
-    )
-    capf.add_argument("--metric-name")
-    capf.add_argument("--max-days", type=float)
-    capf.add_argument("--include-gaps", action="store_true")
-    capf.add_argument("--limit", type=_positive_int, default=500)
-    capf.set_defaults(func=cmd_capacity_forecast)
-
-    mseries = sub.add_parser(
-        "metric-series",
-        help="一个指标的走势(latest 只给一个点)。★ >24h 会切汇总表,云采集指标在那儿没有数据",
-    )
-    mseries.add_argument("--instance-id", type=int)
-    mseries.add_argument("--ip")
-    mseries.add_argument("--host")
-    mseries.add_argument("--metric-name", help="不传则返回全部指标——通常很大,建议指定")
-    mseries.add_argument("--hours", type=int, default=24,
-                         help="回看窗口,默认 24(★ 超过 24 会切到汇总表)")
-    mseries.add_argument("--granularity", choices=["auto", "raw", "minute", "hour", "day"],
-                         help="默认 auto:≤24h 用 raw,再往上依次 minute/hour/day")
-    mseries.set_defaults(func=cmd_metric_series)
+    return _cost._add_capacity_commands(sub, globals())
 
 
 def _add_knowledge_commands(sub) -> None:
-    """知识库。"""
-    kb_search = sub.add_parser(
-        "kb-search", help="Knowledge base: DBA-confirmed symptom->root-cause->remediation history"
-    )
-    kb_search.add_argument("--q", help="semantic query (embeds the text; widened recall)")
-    kb_search.add_argument("--keyword", help="literal keyword match, e.g. ORA-00060")
-    kb_search.add_argument("--db-type", choices=_KB_DB_TYPES)
-    kb_search.add_argument("--rule-id")
-    kb_search.add_argument("--sort", choices=["frequency", "recency"])
-    kb_search.add_argument("--limit", type=int)
-    kb_search.add_argument("--offset", type=int)
-    kb_search.set_defaults(func=cmd_kb_search)
-
-    kb_incidents = sub.add_parser(
-        "kb-incidents", help="Knowledge base: drill down to the raw incidents behind one root cause"
-    )
-    kb_incidents.add_argument("--root-cause-key", required=True)
-    kb_incidents.add_argument("--db-type", choices=_KB_DB_TYPES)
-    kb_incidents.add_argument("--rule-id")
-    kb_incidents.add_argument("--limit", type=int)
-    kb_incidents.set_defaults(func=cmd_kb_incidents)
-
-    kb_doc_search = sub.add_parser(
-        "kb-doc-search", help="Knowledge base: semantic search over curated ops-runbook documents"
-    )
-    kb_doc_search.add_argument("--q", required=True)
-    kb_doc_search.add_argument("--limit", type=int)
-    kb_doc_search.set_defaults(func=cmd_kb_doc_search)
+    return _knowledge._add_knowledge_commands(sub, globals())
 
 
 def _add_elk_commands(sub) -> None:
-    """日志(ELK)。"""
-    elk_status = sub.add_parser(
-        "elk-status", help="ELK connectivity + which DB-log indices exist (v2.24+)"
-    )
-    elk_status.set_defaults(func=cmd_elk_status)
-
-    elk_coverage = sub.add_parser(
-        "elk-coverage", help="Managed instances vs ELK log coverage (who is / isn't shipping logs)"
-    )
-    elk_coverage.set_defaults(func=cmd_elk_coverage)
-
-    elk_search = sub.add_parser(
-        "elk-search", help="Search DB logs by host + time window + level + keyword"
-    )
-    elk_search.add_argument("--host-ip", help="DB host IP")
-    elk_search.add_argument("--host-name", help="DB hostname fallback")
-    elk_search.add_argument("--start", help="Start time (ISO 8601)")
-    elk_search.add_argument("--end", help="End time (ISO 8601)")
-    elk_search.add_argument("--levels", help="Comma-separated log levels, e.g. ERROR,FATAL")
-    elk_search.add_argument("--query-string", help="ES query_string filter")
-    elk_search.add_argument("--index", help="Index pattern override")
-    elk_search.add_argument("--size", type=int, default=200, help="Max rows (1-1000)")
-    elk_search.set_defaults(func=cmd_elk_search)
+    return _elk._add_elk_commands(sub, globals())
 
 
 def _add_cost_commands(sub) -> None:
-    """云成本。"""
-    cloud_monitoring = sub.add_parser(
-        "cloud-monitoring-coverage",
-        help="Which cloud RDS instances have DB-connection deep monitoring, and which do not",
-    )
-    cloud_monitoring.add_argument("--vendor", choices=["aliyun", "huawei"], default="aliyun")
-    mode = cloud_monitoring.add_mutually_exclusive_group()
-    mode.add_argument("--coverage", choices=["all", "enabled", "missing"], default="all")
-    mode.add_argument(
-        "--missing-only",
-        action="store_true",
-        help="Only instances without deep monitoring (shortcut for --coverage missing)",
-    )
-    cloud_monitoring.add_argument("--tenant-id")
-    cloud_monitoring.add_argument("--limit", type=_positive_int, default=2000)
-    cloud_monitoring.add_argument("--offset", type=int)
-    cloud_monitoring.set_defaults(func=cmd_cloud_monitoring_coverage)
-
-    cloud_rightsizing = sub.add_parser(
-        "cloud-rightsizing",
-        help="Cloud RDS right-sizing readout: per-instance peaks, downsize candidates, cost + saving (v2.74+)",
-    )
-    cloud_rightsizing.add_argument("--window-days", type=int, help="Trailing peak window (1-90, default 90)")
-    cloud_rightsizing.add_argument("--cpu-max", type=float, help="Candidate CPU ceiling %% (default 40)")
-    cloud_rightsizing.add_argument("--mem-max", type=float, help="Memory-pressure impediment %% (default 70)")
-    cloud_rightsizing.add_argument("--vendor", choices=["aliyun", "huawei"], help="Restrict to one provider")
-    cloud_rightsizing.set_defaults(func=cmd_cloud_rightsizing)
-
-    cloud_savings = sub.add_parser(
-        "cloud-savings-realized",
-        help="降本成效:已执行的降配/退订计划(不是候选)。二阶段=downsized(规格已变)/verified(账单已降)",
-    )
-    cloud_savings.add_argument("--status", choices=["candidate", "adopted", "downsized",
-                                                    "verified", "rejected", "superseded"],
-                               help="Filter by plan status; omit for all.")
-    cloud_savings.add_argument("--pending-only", action="store_true",
-                               help="Only plans done but not yet invoice-verified (adopted/downsized).")
-    cloud_savings.add_argument("--drifted-only", action="store_true",
-                               help="Only plans whose live report has moved away from the approved snapshot.")
-    cloud_savings.add_argument("--sort", default="saving_desc",
-                               help="saving_desc | saving_asc | cost_desc | name | status | updated_desc")
-    cloud_savings.set_defaults(func=cmd_cloud_savings_realized)
-
-    cloud_cost_history = sub.add_parser(
-        "cloud-cost-history",
-        help="Cloud RDS billing history (gross / paid / coupon by month + year). ALIYUN ONLY.",
-    )
-    cloud_cost_history.add_argument("--since-cycle", metavar="YYYY-MM",
-                                    help="Keep months at or after this billing cycle.")
-    cloud_cost_history.add_argument("--until-cycle", metavar="YYYY-MM",
-                                    help="Keep months at or before this billing cycle.")
-    cloud_cost_history.add_argument("--yoy", action="store_true",
-                                    help="Add per-year delta and %% vs the previous year, on "
-                                         "gross (list price). paid_pct is reported separately: "
-                                         "it is net of vouchers and inverts the real trend in "
-                                         "coupon-heavy years. Partial years are flagged.")
-    cloud_cost_history.set_defaults(func=cmd_cloud_cost_history)
+    return _cost._add_cost_commands(sub, globals())
 
 
 def build_parser() -> argparse.ArgumentParser:

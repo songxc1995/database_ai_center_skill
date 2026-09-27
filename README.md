@@ -10,7 +10,9 @@ This repository contains skills for external model platforms that can make outbo
   - Answers database estate statistics, unused database, inactive discovery, ownership, contact, department, business/application, current alerts, instance topology classification (RAC / Data Guard / replication / standalone / cloud RDS / has-backup), alert evidence, freshness, timeline, and allowlisted diagnostic questions.
   - **Live evidence drill-down (`v2.19.0+`):** runs the read-only, whitelisted diagnostic probes the agentic AI pipeline uses — `probe-catalog` / `probe-run` over `GET|POST /instances/{id}/diagnostics/{catalog,probe}` — for true multi-round root-cause analysis (slow_queries → sql_plan → index_coverage + table_stats → bind_values). Caller passes a probe **name** + bound params (`--sql-id` / `--session-id` / `--object-name`), never SQL; the fixed SQL stays server-side and output is redacted. Requires `AI_DIAGNOSTIC_PROBES_ENABLED=true` and role `ai-client` (or higher).
   - **Knowledge base grounding (`v2.32+`):** `kb-search` / `kb-incidents` / `kb-doc-search` over `GET /knowledge/entries`, `.../incidents`, and `GET /knowledge/documents/search` — pull DBA-confirmed symptom→root-cause→remediation history and curated ops-runbook passages to ground a diagnosis in prior incidents. Read-only (`viewer`+); degrades to empty when the RAG corpus is absent.
-  - Includes `scripts/dba_api_client.py` to make common DBA API calls safely.
+  - Includes `scripts/dba_api_client.py` to make common DBA API calls safely. Its domain
+    implementations live in `scripts/dba_client/`; install the whole skill directory rather
+    than copying only the entrypoint file. The command path and arguments are unchanged.
   - Optionally enriches analysis with `zabbix-readonly` for host-side evidence.
 
 - `zabbix-readonly/`
