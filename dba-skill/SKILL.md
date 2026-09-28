@@ -6,7 +6,7 @@ description: DBA facts and analysis from Database AI Center — alerts, backups,
 # DBA Skill
 
 ## Overview
-Use this skill as the primary read-oriented DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes). The only source-facing write workflow exposed here is bounded metadata refresh: a direct admin request, or an AI-client action order independently approved by an admin. Both use the same load, time, concurrency and object-count gates.
+Use this skill as the primary read-oriented DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes). The only source-facing write workflow exposed here is bounded metadata refresh: a direct admin request, or an AI-client action order independently approved by an admin. Both use the same load, time, concurrency and object-count gates. A separate platform-only action order can reset an offsite backup baseline after independent admin verification of NAS completeness.
 
 Version numbers written into this document are minimums, not a description of what is deployed —
 they will drift, and chasing them here is how a document starts lying. `get
@@ -160,6 +160,7 @@ python scripts/dba_api_client.py business-inference-evidence --database-id 41
 python scripts/dba_api_client.py refresh-database-metadata --database-id 41  # admin only
 python scripts/dba_api_client.py metadata-refresh-status --run-id 9
 python scripts/dba_api_client.py propose-metadata-refresh --database-id 41 --reason "对象快照已过期" --evidence-ref /api/v2/dba/metadata/coverage
+python scripts/dba_api_client.py propose-remote-backup-baseline-reset --instance-id 17 --reason "保留策略调整后，申请核对异地备份基线" --evidence-ref /api/v2/instances/17/remote-backups
 python scripts/dba_api_client.py action-order-status --order-id 7
 python scripts/dba_api_client.py execute-action-order --order-id 7
 python scripts/dba_api_client.py verify-action-order --order-id 7
@@ -403,7 +404,7 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `search-database-objects` | `GET /dba/metadata/objects/search` — exact/prefix cross-fleet object search |
 | `business-inference-evidence` | `GET /dba/metadata/databases/{database_id}/objects` — model-safe evidence from the persisted snapshot |
 | `refresh-database-metadata` / `metadata-refresh-status` | `POST .../refresh` (admin-only bounded queue) / `GET .../refresh-runs/{run_id}` |
-| `propose-metadata-refresh` / `action-order-status` / `execute-action-order` / `verify-action-order` | `POST /dba/actions` / `GET /dba/actions/{id}` / `POST .../execute` / `POST .../verify` — one approved AI-client action |
+| `propose-metadata-refresh` / `propose-remote-backup-baseline-reset` / `action-order-status` / `execute-action-order` / `verify-action-order` | `POST /dba/actions` / `GET /dba/actions/{id}` / `POST .../execute` / `POST .../verify` — one independently approved AI-client action |
 | `prometheus-query` | `POST /instances/{instance_id}/prometheus/query` (read-only PromQL) |
 | `kb-search` / `kb-incidents` / `kb-doc-search` | `GET /knowledge/...` |
 | `elk-status` / `elk-coverage` / `elk-search` | `GET /elk/...` |
@@ -563,6 +564,7 @@ worth a lot less when these disagree.
 - Do not place API keys in shell commands. Rely on the helper's nearest `.env` loading, environment variables, or an external secret manager wrapper.
 - Do not run free-form SQL. Diagnostics come from `diagnostics-catalog` (DBA checks) or whitelisted probe names via `probe-catalog` / `probe-run` (`--sql-id` / `--session-id` / `--object-name` params only — never a SQL string).
 - Source-facing action: for a direct user-requested refresh with an `admin` key, `refresh-database-metadata` queues the bounded collector. With an `ai-client` key, explain the exact target and reason, create a `propose-metadata-refresh` order, and wait for an independent platform-admin approval. An AI key cannot approve. Once the order says `approved`, use `execute-action-order` once, poll `action-order-status`/the run, and call `verify-action-order` only after the run is terminal. If expired, rejected, skipped, partial, or failed, report it; retry requires a fresh proposal and human approval. Never treat a chat reply or the AI key itself as approval. Allowlisted diagnostic POSTs execute reads and remain non-mutating.
+- Platform-only offsite backup reset: first read `backups --instance-id N` and `get /instances/N/remote-backups`. Propose `propose-remote-backup-baseline-reset` only for a recent shrink / not-recovered failure with non-empty reported files; an admin must independently verify the NAS directory, expected sets and sync log, then record their confirmation in the DBA operation-order page. The AI key never calls the admin reset endpoint. After approval, `execute-action-order` consumes the order once and synchronously verifies the platform write; `verify-action-order` can read the terminal result. A skipped or partial result is not success and requires human review before any fresh proposal. This action can clear a real backup alert, so a mere chat reply is not proof of backup completeness.
 - Keep final analysis in Chinese unless the user asks otherwise.
 - Treat Zabbix as supporting evidence only, not a replacement for Database AI Center evidence.
 

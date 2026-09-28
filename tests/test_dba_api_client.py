@@ -628,6 +628,24 @@ class DbaApiClientTest(unittest.TestCase):
                 self.assertEqual(RecordingHandler.requests[0]["method"], method)
                 self.assertEqual(RecordingHandler.requests[0]["path"], path)
 
+    def test_propose_remote_backup_reset_only_creates_approval_order(self):
+        result = self.run_client(
+            "propose-remote-backup-baseline-reset", "--instance-id", "17",
+            "--reason", "保留策略变更后申请核对异地备份基线",
+            "--evidence-ref", "/api/v2/instances/17/remote-backups",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(len(RecordingHandler.requests), 1)
+        request = RecordingHandler.requests[0]
+        self.assertEqual(request["method"], "POST")
+        self.assertEqual(request["path"], "/api/v2/dba/actions")
+        self.assertEqual(json.loads(request["body"]), {
+            "action_type": "remote_backup_baseline_reset",
+            "instance_id": 17,
+            "reason": "保留策略变更后申请核对异地备份基线",
+            "evidence_refs": ["/api/v2/instances/17/remote-backups"],
+        })
+
     def test_kb_search_sends_semantic_and_filter_params(self):
         result = self.run_client(
             "kb-search",

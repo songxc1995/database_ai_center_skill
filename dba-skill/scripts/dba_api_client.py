@@ -1737,6 +1737,10 @@ def cmd_propose_metadata_refresh(args: argparse.Namespace) -> Any:
     return _metadata.cmd_propose_metadata_refresh(args, globals())
 
 
+def cmd_propose_remote_backup_baseline_reset(args: argparse.Namespace) -> Any:
+    return _metadata.cmd_propose_remote_backup_baseline_reset(args, globals())
+
+
 def cmd_action_order_status(args: argparse.Namespace) -> Any:
     return _metadata.cmd_action_order_status(args, globals())
 

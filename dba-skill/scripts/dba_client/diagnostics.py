@@ -339,6 +339,15 @@ def _add_diagnostic_commands(sub, runtime: dict[str, Any]) -> None:
     propose_action.add_argument("--evidence-ref", action="append")
     propose_action.set_defaults(func=runtime["cmd_propose_metadata_refresh"])
 
+    propose_reset = sub.add_parser(
+        "propose-remote-backup-baseline-reset",
+        help="AI client: propose one offsite backup baseline reset for independent admin verification",
+    )
+    propose_reset.add_argument("--instance-id", type=int, required=True)
+    propose_reset.add_argument("--reason", required=True)
+    propose_reset.add_argument("--evidence-ref", action="append", required=True)
+    propose_reset.set_defaults(func=runtime["cmd_propose_remote_backup_baseline_reset"])
+
     action_status = sub.add_parser("action-order-status", help="Read one action order and its refresh status")
     action_status.add_argument("--order-id", type=int, required=True)
     action_status.set_defaults(func=runtime["cmd_action_order_status"])

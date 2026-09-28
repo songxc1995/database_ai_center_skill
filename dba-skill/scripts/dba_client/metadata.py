@@ -183,6 +183,18 @@ def cmd_propose_metadata_refresh(args: argparse.Namespace, runtime: dict[str, An
     )
 
 
+def cmd_propose_remote_backup_baseline_reset(args: argparse.Namespace, runtime: dict[str, Any]) -> Any:
+    return runtime["_request"](
+        "POST", "/dba/actions",
+        body={
+            "action_type": "remote_backup_baseline_reset",
+            "instance_id": args.instance_id,
+            "reason": args.reason,
+            "evidence_refs": args.evidence_ref,
+        },
+    )
+
+
 def cmd_action_order_status(args: argparse.Namespace, runtime: dict[str, Any]) -> Any:
     return runtime["_request"]("GET", f"/dba/actions/{args.order_id}")
 
