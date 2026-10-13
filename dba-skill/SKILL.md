@@ -33,6 +33,9 @@ If `zabbix-readonly` is installed, use it only as supporting host evidence when 
 a complete one. Pass `--all` for any "which ones" question; the client also warns on stderr
 when a page is partial. Prod: 2000 of 2072 rows returned, and the two instances being looked
 for were in the missing 72.
+`--all` continues from the requested position, not from the beginning: use offset 0 or
+page 1 for a whole-collection answer. A nonzero start remains partial (`fetched_all=false`)
+even after reaching the tail; `total` still counts all matching rows.
 
 **Timestamps are UTC. Host logs are UTC+8.** Convert before deciding two records are the same
 event.

@@ -528,6 +528,84 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertTrue(body["fetched_all"])
         self.assertEqual(len(RecordingHandler.requests), 2)
 
+    def test_all_from_nonzero_offset_never_repeats_or_claims_the_whole_collection(self):
+        snapshot = {"status": "ready", "completeness": "complete", "total": 5,
+                    "collected_at": "2026-10-13T02:00:00Z", "limit": 2}
+        for offset, ids in ((2, [2, 3]), (4, [4])):
+            RecordingHandler.responses[f"/api/v2/dba/metadata/databases/41/objects?limit=2&offset={offset}"] = (
+                200, {**snapshot, "offset": offset, "truncated": offset + len(ids) < 5,
+                      "items": [{"id": identity, "object_name": f"t{identity}"} for identity in ids]},
+            )
+        result = self.run_client("database-objects", "--database-id", "41", "--limit", "2", "--offset", "2", "--all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([row["id"] for row in payload["items"]], [2, 3, 4])
+        self.assertEqual([row["query"]["offset"] for row in RecordingHandler.requests], [["2"], ["4"]])
+        self.assertEqual(payload["total"], 5)
+        self.assertTrue(payload["truncated"])
+        self.assertFalse(payload["fetched_all"])
+        self.assertIn("offset 2", result.stderr)
+        self.assertNotIn("page guard", result.stderr)
+
+    def test_all_from_page_two_stops_at_the_end_and_reports_the_missing_prefix(self):
+        for page, ids in ((2, [2, 3]), (3, [4])):
+            RecordingHandler.responses[f"/api/v2/alerts?status=active&page={page}&page_size=2"] = (
+                200, {"items": [{"id": identity} for identity in ids], "total": 5,
+                      "page": page, "page_size": 2, "truncated": page < 3},
+            )
+        result = self.run_client("alerts-list", "--page", "2", "--page-size", "2", "--all")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual([row["id"] for row in payload["items"]], [2, 3, 4])
+        self.assertEqual([row["query"]["page"] for row in RecordingHandler.requests], [["2"], ["3"]])
+        self.assertTrue(payload["truncated"])
+        self.assertFalse(payload["fetched_all"])
+        self.assertIn("page 2", result.stderr)
+        self.assertNotIn("page guard", result.stderr)
+
+    def test_nonzero_offset_all_uses_request_position_when_response_omits_or_nulls_it(self):
+        for position in ({}, {"offset": None, "limit": None}):
+            with self.subTest(position=position):
+                RecordingHandler.requests = []
+                for offset, ids in ((2, [2, 3]), (4, [4])):
+                    RecordingHandler.responses[f"/api/v2/dba/metadata/databases/41/objects?limit=2&offset={offset}"] = (
+                        200, {"total": 5, **position, "items": [{"id": identity} for identity in ids]},
+                    )
+                result = self.run_client("database-objects", "--database-id", "41", "--limit", "2", "--offset", "2", "--all")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual([row["id"] for row in payload["items"]], [2, 3, 4])
+                self.assertEqual([row["query"]["offset"] for row in RecordingHandler.requests], [["2"], ["4"]])
+                self.assertTrue(payload["truncated"])
+                self.assertFalse(payload["fetched_all"])
+                self.assertIn("offset 2", result.stderr)
+                self.assertNotIn("page guard", result.stderr)
+
+    def test_all_offset_boundaries_distinguish_empty_collection_from_missing_prefix(self):
+        for start, total, expected_ids, expected_offsets, complete in (
+            (0, 3, [0, 1, 2], [0, 2], True),
+            (5, 3, [], [5], False),
+            (2, 0, [], [2], True),
+        ):
+            with self.subTest(start=start, total=total):
+                RecordingHandler.requests = []
+                for offset in expected_offsets:
+                    RecordingHandler.responses[f"/api/v2/dba/metadata/databases/41/objects?limit=2&offset={offset}"] = (
+                        200, {"total": total, "offset": offset, "limit": 2,
+                              "items": [{"id": identity} for identity in range(offset, min(offset + 2, total))]},
+                    )
+                result = self.run_client("database-objects", "--database-id", "41", "--limit", "2", "--offset", str(start), "--all")
+                self.assertEqual(result.returncode, 0, result.stderr)
+                payload = json.loads(result.stdout)
+                self.assertEqual([row["id"] for row in payload["items"]], expected_ids)
+                self.assertEqual([int(row["query"]["offset"][0]) for row in RecordingHandler.requests], expected_offsets)
+                self.assertEqual(payload["fetched_all"], complete)
+                self.assertEqual(payload["truncated"], not complete)
+                if complete:
+                    self.assertNotIn("partial_result", result.stderr)
+                else:
+                    self.assertIn("offset 5", result.stderr)
+
     def test_metadata_objects_partial_warning_recommends_all_when_request_has_paging_params(self):
         RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=0"] = (
             200,

@@ -27,9 +27,11 @@ Production 2026-09-01: a caller asked which instances had no databases, received
 rows, and both instances it was looking for were among the missing 72 — the JSON gave no hint
 until someone read `total`.
 
-The client now warns on stderr whenever a page is partial, and `--all` follows the pagination
-to the end. Use `--all` for any question of the form "which ones", and treat a bare page as
-provisional.
+The client warns on stderr whenever a page is partial. `--all` continues from the requested
+offset/page to the end, within the page budget; it does not rewind. Use offset 0 or page 1
+for a whole-collection answer. A nonzero start omits earlier rows, keeps `total` as the
+whole matching count, and reports `truncated=true`, `fetched_all=false` even after reaching
+the tail. A genuinely empty collection (`total=0`) is complete. Treat a bare page as provisional.
 
 ## There is no single response envelope
 

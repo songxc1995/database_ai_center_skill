@@ -394,7 +394,26 @@ def _warn_if_truncated(
         pages = any(k in meta for k in ("offset", "limit", "page", "page_size")) or any(
             k in (request_params or {}) for k in ("offset", "limit", "page", "page_size")
         )
-        if _FETCH_ALL and pages:
+        try:
+            offset = meta.get("offset")
+            start_offset = int(offset if offset is not None else (request_params or {}).get("offset", 0))
+            start_page = int(meta.get("page") or (request_params or {}).get("page") or 1)
+        except (TypeError, ValueError):
+            start_offset = 0
+            start_page = 1
+        if _FETCH_ALL and start_offset > 0:
+            advice = (
+                f"--all started at offset {start_offset}, so earlier rows are not included. "
+                "Start at offset 0 to fetch the whole collection; page-budget and early-end "
+                "limits may also leave later rows uncollected."
+            )
+        elif _FETCH_ALL and start_page > 1:
+            advice = (
+                f"--all started at page {start_page}, so earlier pages are not included. "
+                "Start at page 1 to fetch the whole collection; page-budget and early-end "
+                "limits may also leave later rows uncollected."
+            )
+        elif _FETCH_ALL and pages:
             advice = (
                 f"--all stopped at the {_MAX_PAGES}-page guard. Raise it with --max-pages N, "
                 f"ask for bigger pages with the command's --limit / --page-size, or narrow the "
@@ -458,16 +477,19 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
                   "do not infer a business from mixed snapshots.")
 
     collected = list(items)
+    start_offset = 0
     total = meta.get("total")
     if not isinstance(total, int):
         return first
 
     if "offset" in meta or "limit" in meta or ("offset" in params and "limit" in params):
         size = int(meta.get("limit") or params.get("limit") or len(items) or 1)
+        offset = meta.get("offset")
+        start_offset = int(offset if offset is not None else params.get("offset", 0))
         pages = 0
-        while len(collected) < total and pages < page_limit and size > 0:
+        while start_offset + len(collected) < total and pages < page_limit and size > 0:
             pages += 1
-            nxt = _request_once(method, path, params={**params, "limit": size, "offset": len(collected)})
+            nxt = _request_once(method, path, params={**params, "limit": size, "offset": start_offset + len(collected)})
             check_snapshot(nxt)
             more, _ = _envelope(nxt)
             if not more:
@@ -476,8 +498,9 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
     elif "page" in meta or "page_size" in meta or ("page" in params and "page_size" in params):
         size = int(meta.get("page_size") or params.get("page_size") or len(items) or 1)
         page = int(meta.get("page") or params.get("page") or 1)
+        start_offset = (page - 1) * size
         pages = 0
-        while len(collected) < total and pages < page_limit and size > 0:
+        while start_offset + len(collected) < total and pages < page_limit and size > 0:
             pages += 1
             page += 1
             nxt = _request_once(method, path, params={**params, "page": page, "page_size": size})
@@ -489,8 +512,8 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
 
     out = {key: value for key, value in first.items() if key != "items"}
     out["items"] = collected
-    out["truncated"] = len(collected) < total
-    out["fetched_all"] = len(collected) >= total
+    out["fetched_all"] = len(collected) >= total and (start_offset == 0 or total == 0)
+    out["truncated"] = not out["fetched_all"]
     return out
 
 
