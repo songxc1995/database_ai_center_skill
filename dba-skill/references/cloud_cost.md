@@ -180,20 +180,23 @@ something the metrics do not show.
 | `verified` | **an invoice came in below the pre-change baseline** — real money |
 | `rejected` / `superseded` | turned down, or replaced by a newer proposal |
 
-`verified_monthly_saving = ¥0` is the normal state for this fleet, not a broken pipeline:
-almost every instance is 包年包月 and a subscription re-prices **only at renewal**. The
-response says which wait you are looking at:
+`verified_monthly_saving = ¥0` is an amount, not a diagnosis. Use the returned
+`verification_basis` and note to distinguish missing evidence, incomparable bills and a
+genuine zero. Subscription orders with explicit comparable service periods can establish
+normalized monthly rates; the platform does not universally wait for renewal. Incomplete
+bills, ambiguous periods, refunds and vouchers cannot prove recurring monthly savings.
 
 | `verification_basis` | Means |
 |---|---|
+| `subscription_term_normalized` | verified monthly rates from complete subscription orders with explicit service periods; not cumulative cash savings |
 | `subscription_renewal` | waiting for renewal; `verification_expected_at` has the date |
 | `next_billing_cycle` | pay-as-you-go, next cycle shows it |
 | `waiting_clean_cycle` | the latest bill is a **refund cycle**, not a run rate |
-| `unverifiable_no_baseline` | **will never verify by itself** — the pre-change bill was never captured |
+| `unverifiable_no_baseline` | current evidence lacks a valid pre-change bill; historical baseline recovery may be possible, otherwise human evidence is needed |
 | `unknown_missing_expire_time` | 包年包月 with no recorded expiry |
 
-`unverifiable_no_baseline` is the one to call out: it is not queued, it is stuck, and only a
-manual invoice comparison closes it.
+`unverifiable_no_baseline` needs an evidence explanation, not a promised verification date.
+Do not assume recovery succeeded until the platform returns a valid baseline and result.
 
 `drift_note` means the live report has moved away from the snapshot a human approved. Shown,
 never auto-applied — but do not leave it buried; `cloud-savings-realized` lifts drifted plans

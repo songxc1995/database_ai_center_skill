@@ -6,7 +6,11 @@ description: DBA facts and analysis from Database AI Center — alerts, backups,
 # DBA Skill
 
 ## Overview
-Use this skill as the primary read-oriented DBA data and analysis workflow for Database AI Center `v2.19+` (server-side capabilities are discovered dynamically via `probe-catalog` and `ai-endpoints`, so newer platform releases are picked up without skill changes). The only source-facing write workflow exposed here is bounded metadata refresh: a direct admin request, or an AI-client action order independently approved by an admin. Both use the same load, time, concurrency and object-count gates. A separate platform-only action order can reset an offsite backup baseline after independent admin verification of NAS completeness.
+Use this skill for local DBA evidence analysis, batch formatting, exports and snapshot comparisons. AgentMesh uses the separately deployed MCP gateway as its primary platform interface; this skill does not depend on MCP. Discover current reads through `ai-endpoints` and engine probes through `probe-catalog`.
+
+The CLI has dedicated proposals for bounded metadata refresh and platform-only offsite backup baseline reset, plus generic order status/execute/verify commands. MySQL/PG session preflight and proposals, Oracle evidence-based proposals and PostgreSQL table ANALYZE proposals are MCP-first capabilities without dedicated CLI commands here. For those workflows use the published MCP tools and the platform operation guide; do not invent CLI commands or free-form POSTs. The platform owns eligibility, independent admin approval, frozen targets, single-use execution and audit; the same proposing identity must execute its order.
+
+The platform integration contract is maintained with the API in [docs/dba-skill-api.md](https://gitlab.fosun.com/fosun-infra/devops/database-ai-center/-/blob/main/docs/dba-skill-api.md); the operation workflow is [docs/digital-employee-dba-operations.md](https://gitlab.fosun.com/fosun-infra/devops/database-ai-center/-/blob/main/docs/digital-employee-dba-operations.md). These are private project documents, not prerequisites for ordinary evidence reads. If unavailable, use the current returned catalog and report missing workflow evidence rather than guessing.
 
 Version numbers written into this document are minimums, not a description of what is deployed —
 they will drift, and chasing them here is how a document starts lying. `get
@@ -310,9 +314,11 @@ Five traps that produce a wrong answer rather than an obviously missing one:
    `full_year_*`. A group with no monthly data comes back `null` with the reason in `pct_note`,
    never quietly left on the full-year basis beside a same-months `pct`.
 
-`verified_monthly_saving = ¥0` is normal, not a broken pipeline: this fleet is almost all
-包年包月 and a subscription re-prices only at renewal. `verification_basis` says which wait it
-is — and `unverifiable_no_baseline` means it will **never** verify by itself.
+`verified_monthly_saving = ¥0` alone does not explain why verification is pending. Read the
+returned `verification_basis` and note: the platform can verify comparable monthly rates
+from complete subscription orders with explicit service periods, without universally waiting
+for renewal. A missing baseline is an evidence gap; valid historical bills may fill it, but
+estimates, refunds and vouchers are not verified recurring savings.
 
 **Full vocabulary — the four saving figures and how they nest, every `shortlist_state`, the
 month-end evidence rule, the two-stage verification table — is in
@@ -449,8 +455,9 @@ python scripts/dba_api_client.py backups --instance-ids 14,20,27,206,207
 
 One process, one credential resolution, one array back. Reads are capped (600/minute
 globally, 30/minute and 10/minute per instance for live-database probes), so a wide fan-out
-will be throttled — a 429 is retried with backoff, and only a genuinely exhausted quota
-fails. Every requested id lands in `items` or in `failed`; `partial` is true when anything
+will be throttled — ordinary reads retry 429 with backoff. Operation-order POSTs are sent
+once, including on 429; a request error never establishes an order outcome. Every requested
+id lands in `items` or in `failed`; `partial` is true when anything
 failed **or** when an answer was built on a dependency that could not be read
 (`degraded_instances` names those). A short list shaped exactly like a complete one, and a
 complete-looking answer assembled from a half-read, are the two failures this avoids.
@@ -668,6 +675,12 @@ For alert or diagnostic analysis, return:
 Include caveats when evidence is stale, diagnostics are skipped, host evidence is unavailable, or the API returns partial data.
 
 ## Failure Handling
+- Operation-order POST errors carry `request_status`, `http_status`, `error_code`,
+  `invalid_fields`, `retryable=false` and `order_status=unknown` on stderr with a nonzero exit.
+  4xx is a rejected request; network/invalid response/5xx is unknown. Neither proves whether
+  the original command ran. Read the original order when its ID is known; without an ID,
+  ask the DBA to check. Keep the original target and evidence; do not automatically retry,
+  replace or re-propose. Upstream error text and inputs are not returned.
 - If required config is missing, stop and say which variable is missing.
 - If `resolve` returns no matches, say no matching instance/database/alert was found and show the filters used.
 - If `context` or `alert-evidence` fails, return whatever earlier evidence is available and mark the result degraded.

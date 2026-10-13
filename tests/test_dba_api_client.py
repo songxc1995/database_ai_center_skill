@@ -47,7 +47,7 @@ class RecordingHandler(BaseHTTPRequestHandler):
         )
 
     def _send(self, status, payload):
-        body = json.dumps(payload).encode("utf-8")
+        body = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -645,6 +645,34 @@ class DbaApiClientTest(unittest.TestCase):
             "reason": "保留策略变更后申请核对异地备份基线",
             "evidence_refs": ["/api/v2/instances/17/remote-backups"],
         })
+
+    def test_rate_limited_action_execution_is_not_repeated(self):
+        RecordingHandler.responses["/api/v2/dba/actions/7/execute"] = (
+            429, {"detail": "synthetic upstream refusal"},
+        )
+        result = self.run_client("execute-action-order", "--order-id", "7")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(len(RecordingHandler.requests), 1)
+        error = json.loads(result.stderr.strip())
+        self.assertEqual(error["request_status"], "rejected")
+        self.assertEqual(error["http_status"], 429)
+        self.assertEqual(error["order_status"], "unknown")
+        self.assertIs(error["retryable"], False)
+
+    def test_invalid_action_response_preserves_unknown_without_echoing_body(self):
+        for raw in (b"<html>password=synthetic-sensitive-value</html>", b"\xffsynthetic-sensitive-value"):
+            with self.subTest(raw=raw):
+                RecordingHandler.requests = []
+                RecordingHandler.responses["/api/v2/dba/actions/7/execute"] = (200, raw)
+                result = self.run_client("execute-action-order", "--order-id", "7")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertEqual(len(RecordingHandler.requests), 1)
+                error = json.loads(result.stderr.strip())
+                self.assertEqual(error["request_status"], "unknown")
+                self.assertIsNone(error["http_status"])
+                self.assertEqual(error["order_status"], "unknown")
+                self.assertIs(error["retryable"], False)
+                self.assertNotIn("synthetic-sensitive-value", result.stderr)
 
     def test_kb_search_sends_semantic_and_filter_params(self):
         result = self.run_client(

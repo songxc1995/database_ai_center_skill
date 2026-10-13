@@ -1360,6 +1360,33 @@ def _request_once(method: str, path: str, *, params: dict[str, Any] | None = Non
             time.sleep(delay)
 
 
+def _fail_action_request(code: int | None, *, raw: str = "", submitted_fields: Any = ()) -> None:
+    """Report request facts without inferring an order outcome or echoing upstream text."""
+    invalid_fields: set[str] = set()
+    if code == 422:
+        try:
+            payload = json.loads(raw)
+            detail = payload.get("detail") if isinstance(payload, dict) else None
+            for row in detail if isinstance(detail, list) else []:
+                loc = row.get("loc") if isinstance(row, dict) else None
+                if (isinstance(loc, list) and len(loc) >= 2 and loc[0] == "body"
+                        and isinstance(loc[1], str) and loc[1] in submitted_fields):
+                    invalid_fields.add(loc[1])
+        except ValueError:
+            pass
+    error_code = {401: "authentication_required", 403: "permission_denied", 404: "not_found",
+                  409: "request_conflict", 422: "invalid_arguments", 429: "rate_limited"}.get(
+                      code, "transport_or_response_unknown" if code is None else "platform_error")
+    _fail(
+        "action_request_error",
+        "Action request did not return a usable result. Do not retry or propose a replacement; "
+        "read the original order if its ID is known, otherwise ask the DBA to check.",
+        request_status="unknown" if code is None or code >= 500 else "rejected",
+        http_status=code, error_code=error_code, invalid_fields=sorted(invalid_fields),
+        retryable=False, order_status="unknown",
+    )
+
+
 def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, body: dict[str, Any] | None = None) -> Any:
     base = _base_url()
     token = _api_key()
@@ -1377,14 +1404,19 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
         data = json.dumps(body).encode("utf-8")
         headers["Content-Type"] = "application/json"
     req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    is_action_request = method == "POST" and (path == "/dba/actions" or path.startswith("/dba/actions/"))
     try:
         with urllib.request.urlopen(req, timeout=_timeout()) as response:
             raw = response.read()
             if not raw:
+                if is_action_request:
+                    _fail_action_request(None)
                 return None
             try:
                 return json.loads(raw.decode("utf-8"))
             except json.JSONDecodeError as exc:
+                if is_action_request:
+                    _fail_action_request(None)
                 # A 2xx that is not JSON almost always means the request never reached the
                 # API: a base URL missing its /api/v2 prefix lands on the web server, which
                 # answers 200 with an HTML page. "Expecting value: line 1 column 1" describes
@@ -1401,10 +1433,17 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
                     detail=str(exc),
                 )
     except urllib.error.HTTPError as exc:
-        raw = exc.read().decode("utf-8", errors="replace")
+        try:
+            raw = exc.read().decode("utf-8", errors="replace")
+        except (OSError, http.client.HTTPException):
+            if is_action_request:
+                _fail_action_request(None)
+            raise
         global _LAST_HTTP_STATUS, _LAST_HTTP_BODY
         _LAST_HTTP_STATUS = exc.code
         _LAST_HTTP_BODY = raw
+        if is_action_request:
+            _fail_action_request(exc.code, raw=raw, submitted_fields=body or {})
         if exc.code == 429:
             # Nothing ran: the limiter rejected the request before it reached the handler,
             # so this is safe to repeat. Retrying here rather than at the call site is the
@@ -1423,21 +1462,35 @@ def _http_call(method: str, path: str, *, params: dict[str, Any] | None = None, 
             **extra,
         )
     except urllib.error.URLError as exc:
+        if is_action_request:
+            _fail_action_request(None)
         _fail("network_error", f"{method} {path} failed: {exc.reason}")
     except TimeoutError:
+        if is_action_request:
+            _fail_action_request(None)
         _fail("network_error", f"{method} {path} timed out")
     except (http.client.HTTPException, ConnectionError) as exc:
+        if is_action_request:
+            _fail_action_request(None)
         # The request went out and the connection broke on the way back: getresponse() runs
         # outside urllib's URLError wrapping, and read() can end short (IncompleteRead). Left
         # uncaught it surfaced as a raw traceback instead of an error the caller can read.
         _fail("network_error", f"{method} {path} failed mid-response: {type(exc).__name__}: {exc}")
     except OSError as exc:
+        if is_action_request:
+            _fail_action_request(None)
         # socket.timeout on Python 3.9 is an OSError but NOT a TimeoutError (3.10+ aliases it),
         # and a timeout while reading the status line escapes urllib's URLError wrapping — the
         # skill host runs 3.9, and `get /clusters` right after a deploy ended in a raw traceback.
         _fail("network_error", f"{method} {path} failed: {type(exc).__name__}: {exc}")
     except json.JSONDecodeError as exc:
+        if is_action_request:
+            _fail_action_request(None)
         _fail("invalid_json", f"{method} {path} returned invalid JSON: {exc}")
+    except UnicodeDecodeError:
+        if is_action_request:
+            _fail_action_request(None)
+        raise
 
 
 def _common_filters(parser: argparse.ArgumentParser) -> None:
