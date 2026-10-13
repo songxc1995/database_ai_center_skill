@@ -116,7 +116,7 @@ def cmd_business_inference_evidence(args: argparse.Namespace, runtime: dict[str,
             "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
             "sample_scope": "unavailable" if not available else ("partial_snapshot" if partial else "complete"),
             "confidence_ceiling": (
-                "none" if not items else ("medium" if partial or tables_with_comments == 0 else "high")
+                "none" if not available or not items else ("medium" if partial or tables_with_comments == 0 else "high")
             ),
         },
         "total": payload.get("total") if isinstance(payload, dict) else None,

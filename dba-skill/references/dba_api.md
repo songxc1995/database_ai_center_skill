@@ -82,7 +82,7 @@ platform does say why (`note` carries e.g. `Oracle proxy diagnostics failed: …
 
 ## What an `ai-client` key may POST
 
-Everything else is read-only. Exactly three write endpoints accept `ai-client`:
+The following POSTs execute allowlisted **reads**, not arbitrary source writes:
 
 ```text
 POST /dba/instances/{id}/diagnostics/run     # catalog check_ids
@@ -90,14 +90,21 @@ POST /instances/{id}/diagnostics/probe       # allowlisted probe names
 POST /instances/{id}/prometheus/query        # read-only PromQL
 ```
 
+Approved bounded mutations use operation orders, with platform-owned eligibility,
+independent admin approval, frozen targets and single-use execution. The CLI currently
+provides metadata-refresh and offsite-baseline proposals; MCP carries the session-action
+and Oracle evidence workflows. Follow the published operation guide linked from `SKILL.md`
+rather than treating this diagnostic list as the complete mutation surface.
+
 An `admin` key additionally may queue the predefined metadata collector with
 `POST /dba/metadata/databases/{id}/refresh`. This is an explicit mutation of the platform
 queue, not permission for arbitrary SQL or a direct source-database query; ordinary metadata
 reads use the persisted snapshot.
 
-`diagnostics-run` **is** available to `ai-client`. A 403 on it means the key in use is not an
-`ai-client` key (a `viewer` key produces exactly this), not that the endpoint is closed —
-check the key before concluding the surface is smaller than it is.
+`diagnostics-run` **is** available to `ai-client`, subject to platform gates and scope.
+A 403 can reflect role, tenant or other authorization restrictions; `whoami` identifies
+the actual key, while the returned error and catalog explain the remaining evidence gaps.
+Do not infer a revoked/wrong-role key from that status alone.
 
 ## Searching database logs: use the engine's words, not the tool's
 

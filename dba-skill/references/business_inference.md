@@ -11,6 +11,12 @@ python scripts/dba_api_client.py business-inference-evidence \
 
 The command reads all pages of the persisted metadata-directory snapshot. It never connects to the source database. It returns object names, types and comments plus snapshot status, completeness and collection time. It does not read table contents, row counts, sizes, SQL text, contacts, instance names, or the stored `service_domain`, and performs no write.
 
+Paging checks the snapshot status, completeness, collection time and total against the first
+page. A change fails with `metadata_snapshot_changed` and returns no mixed evidence. This
+is a consistency check on returned markers, not an atomic server snapshot or permission to
+refresh. Unavailable snapshots always have `confidence_ceiling=none`, even if old objects
+remain in the response; their names are not usable business evidence.
+
 Do not substitute `instance`, `databases-search`, or ownership endpoints before inference: their names and stored ownership fields leak the answer and turn the inference into a lookup. Use them only to resolve the caller's target before starting, or after producing a blind inference when the user explicitly asks for validation against the recorded value.
 
 ## Decide whether inference is allowed

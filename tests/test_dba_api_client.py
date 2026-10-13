@@ -607,6 +607,37 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(body["signal_quality"]["confidence_ceiling"], "none")
         self.assertEqual([item["code"] for item in body["limitations"]], ["empty_metadata_snapshot"])
 
+    def test_failed_metadata_with_old_objects_has_no_inference_confidence(self):
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=500&offset=0"] = (
+            200, {"status": "failed", "completeness": "complete", "total": 1,
+                  "collected_at": "2026-10-01T02:00:00Z", "truncated": False,
+                  "items": [{"object_name": "old_orders", "object_type": "table", "object_comment": "旧订单"}]},
+        )
+        result = self.run_client("business-inference-evidence", "--database-id", "41")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        evidence = json.loads(result.stdout)
+        self.assertFalse(evidence["available"])
+        self.assertEqual(evidence["evidence_status"], "unavailable")
+        self.assertEqual(evidence["signal_quality"]["confidence_ceiling"], "none")
+        self.assertEqual(evidence["items"][0]["table_name"], "old_orders")
+
+    def test_metadata_all_refuses_a_page_from_a_new_snapshot(self):
+        snapshot = {"status": "ready", "completeness": "complete", "total": 3,
+                    "collected_at": "2026-10-01T02:00:00Z", "limit": 2}
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=0"] = (
+            200, {**snapshot, "offset": 0, "truncated": True,
+                  "items": [{"object_name": "old_a"}, {"object_name": "old_b"}]},
+        )
+        RecordingHandler.responses["/api/v2/dba/metadata/databases/41/objects?limit=2&offset=2"] = (
+            200, {**snapshot, "offset": 2, "truncated": False, "collected_at": "2026-10-13T02:00:00Z",
+                  "items": [{"object_name": "new_c"}]},
+        )
+        result = self.run_client("database-objects", "--database-id", "41", "--limit", "2", "--all")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertEqual(json.loads(result.stderr)["error"], "metadata_snapshot_changed")
+        self.assertEqual(len(RecordingHandler.requests), 2)
+
     def test_metadata_directory_commands_map_to_the_read_and_admin_endpoints(self):
         cases = [
             (("metadata-coverage",), "GET", "/api/v2/dba/metadata/coverage"),

@@ -443,6 +443,20 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
     if items is None or meta.get("shape") != "envelope":
         return first
 
+    segments = path.strip("/").split("/")
+    metadata_objects = (method == "GET" and len(segments) == 5
+                        and segments[:3] == ["dba", "metadata", "databases"]
+                        and segments[3].isdigit() and segments[4] == "objects")
+    snapshot_fields = ("status", "completeness", "collected_at", "total")
+    snapshot = tuple(first.get(field) for field in snapshot_fields) if metadata_objects else None
+
+    def check_snapshot(page: Any) -> None:
+        if snapshot is not None and (not isinstance(page, dict)
+                or tuple(page.get(field) for field in snapshot_fields) != snapshot):
+            _fail("metadata_snapshot_changed",
+                  "The metadata snapshot changed while paging. No complete evidence is returned; "
+                  "do not infer a business from mixed snapshots.")
+
     collected = list(items)
     total = meta.get("total")
     if not isinstance(total, int):
@@ -454,6 +468,7 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
         while len(collected) < total and pages < page_limit and size > 0:
             pages += 1
             nxt = _request_once(method, path, params={**params, "limit": size, "offset": len(collected)})
+            check_snapshot(nxt)
             more, _ = _envelope(nxt)
             if not more:
                 break
@@ -466,6 +481,7 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
             pages += 1
             page += 1
             nxt = _request_once(method, path, params={**params, "page": page, "page_size": size})
+            check_snapshot(nxt)
             more, _ = _envelope(nxt)
             if not more:
                 break
