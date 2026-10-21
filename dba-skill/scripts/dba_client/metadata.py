@@ -66,6 +66,7 @@ def cmd_business_inference_evidence(args: argparse.Namespace, runtime: dict[str,
     )
     status_value = str(payload.get("status") or "never_collected") if isinstance(payload, dict) else "never_collected"
     completeness = payload.get("completeness") if isinstance(payload, dict) else None
+    scoped = isinstance(payload, dict) and payload.get("read_scope") == "authorized_schemas"
     available = status_value not in {"never_collected", "failed", "archived"}
     partial = completeness == "partial" or status_value == "partial" or bool(
         payload.get("truncated") if isinstance(payload, dict) else False
@@ -100,6 +101,12 @@ def cmd_business_inference_evidence(args: argparse.Namespace, runtime: dict[str,
                 "and should be low-confidence unless several names independently agree."
             ),
         })
+    if scoped:
+        limitations.append({
+            "code": "authorized_scope_only",
+            "message": "Only authorized schemas are visible; synonyms and unresolved target references are excluded. "
+                       "This is not the whole database; do not infer other schemas or the whole database's business.",
+        })
     return {
         "task": "infer_database_business",
         "database_id": database_id,
@@ -110,13 +117,16 @@ def cmd_business_inference_evidence(args: argparse.Namespace, runtime: dict[str,
         "snapshot_status": status_value,
         "completeness": completeness,
         "collected_at": payload.get("collected_at") if isinstance(payload, dict) else None,
+        "read_scope": payload.get("read_scope", "database"),
+        "policy_version": payload.get("policy_version"),
+        "policy_key_id": payload.get("policy_key_id"),
         "signal_quality": {
             "tables_returned": len(items),
             "tables_with_comments": tables_with_comments,
             "comment_coverage_pct": round(tables_with_comments * 100 / len(items), 1) if items else 0.0,
-            "sample_scope": "unavailable" if not available else ("partial_snapshot" if partial else "complete"),
+            "sample_scope": "unavailable" if not available else ("authorized_schemas" if scoped else ("partial_snapshot" if partial else "complete")),
             "confidence_ceiling": (
-                "none" if not available or not items else ("medium" if partial or tables_with_comments == 0 else "high")
+                "none" if not available or not items else ("medium" if scoped or partial or tables_with_comments == 0 else "high")
             ),
         },
         "total": payload.get("total") if isinstance(payload, dict) else None,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import http.client
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 import os
@@ -466,7 +467,7 @@ def _fetch_all(method: str, path: str, params: dict[str, Any], *, page_limit: in
     metadata_objects = (method == "GET" and len(segments) == 5
                         and segments[:3] == ["dba", "metadata", "databases"]
                         and segments[3].isdigit() and segments[4] == "objects")
-    snapshot_fields = ("status", "completeness", "collected_at", "total")
+    snapshot_fields = ("status", "completeness", "collected_at", "total", "read_scope", "policy_version", "policy_key_id")
     snapshot = tuple(first.get(field) for field in snapshot_fields) if metadata_objects else None
 
     def check_snapshot(page: Any) -> None:
@@ -871,6 +872,7 @@ def _write_snapshot(payload: Any, argv: list[str], platform_version: str | None)
         "taken_at": datetime.now(timezone.utc).isoformat(),
         "command": argv,
         "platform_version": platform_version,
+        "platform_fingerprint": hashlib.sha256(_base_url().encode("utf-8")).hexdigest(),
         "payload": payload,
     }, ensure_ascii=False), encoding="utf-8")
     return str(path)
@@ -2107,7 +2109,19 @@ def main(argv: list[str] | None = None) -> int:
                 exit_code=2,
                 snapshot_dir=str(_snapshot_dir() or "<home unavailable>"),
             )
-        diff = _diff_payloads(previous.get("payload"), payload)
+        old_payload = previous.get("payload")
+        current = payload if isinstance(payload, dict) else {}
+        old = old_payload if isinstance(old_payload, dict) else {}
+        if (current.get("read_scope") == "authorized_schemas" or old.get("read_scope") == "authorized_schemas"
+                or current.get("policy_key_id") is not None or old.get("policy_key_id") is not None):
+            authority = ("read_scope", "policy_key_id", "policy_version")
+            if (tuple(current.get(field) for field in authority) != tuple(old.get(field) for field in authority)
+                    or type(current.get("policy_key_id")) is not int
+                    or type(current.get("policy_version")) is not int
+                    or previous.get("platform_fingerprint") != hashlib.sha256(_base_url().encode("utf-8")).hexdigest()):
+                _fail("snapshot_access_changed", "Snapshot authority or platform changed/unknown. "
+                      "Do not reuse old evidence after a scope change; explicitly take a new snapshot.", exit_code=2)
+        diff = _diff_payloads(old_payload, payload)
         diff = _annotate_judgement_changes(
             diff, previous.get("platform_version"), platform_version
         )
