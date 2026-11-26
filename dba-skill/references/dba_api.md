@@ -365,14 +365,15 @@ the alert list, and that lead time is the entire reason to ask.
 
 Two reading traps when acting on projections:
 
-- **Fewer than 5 daily points (such as newly onboarded cloud-disk day aggregates) always yields `goodness: 1.0`** when only 2 points exist. Check `points` and read `capacity-forecast-series`'s `reason` (`too few points`) before trusting a 2-point slope as a confident forecast.
-- **High current usage with a gentle slope can still be urgent.** Sorting only by `days_to_cross` buries an instance already above 95% whose daily delta is small; inspect high `current` rows alongside short lead times.
+- **Fewer than 5 daily points (such as newly onboarded cloud-disk day aggregates) always yields `goodness: 1.0`** when only 2 points exist. On `v3.167+`, check `low_sample` (`true` when `points < min_points`) and `confidence` (`"high" | "medium" | "low"`), plus `points` and `capacity-forecast-series`'s `reason` (`too few points`), before trusting a 2-point slope as a confident forecast.
+- **High current usage with a gentle slope can still be urgent.** On `v3.167+`, items where `current >= min(90.0, ceiling - 5.0)` carry `high_watermark: true` and are sorted to the top of `capacity-forecast` ahead of lower-usage items with shorter `days_to_cross` (and retained in weekly inspection `capacity_risks` with `high_watermark_count`). On older servers, inspect high `current` rows manually alongside short lead times.
 
 ## SQL digest trends: empty regressions is not "no slow SQL"
 
 `sql-regressions` compares each digest's recent window against the preceding `baseline_days`
 window from platform-collected 15-minute digest deltas (no live source connection):
 
+- **Default noise & baseline maturity gates (`v3.167+`):** `sql-regressions` now filters system/monitoring/internal maintenance SQL by default (`filtered_system_sql_count`) and excludes digests with fewer than `min_baseline_samples` baseline 15-minute buckets (default `4`, reported in `immature_baseline_filtered_count` and per-item `baseline_samples` / `baseline_span_hours`). Pass `--include-system-sql` when investigating internal monitoring queries (`is_system_sql: true`), or `--min-baseline-samples N` to adjust the maturity threshold.
 - **Read `coverage` first, and drill into blind spots with `sql-trends-coverage`.** Instances in
   `unavailable` (disabled `performance_schema`, missing `pg_stat_statements`, privilege denial,
   or source timeout) or `unsupported` (agentless without credentials, unsupported engine) never

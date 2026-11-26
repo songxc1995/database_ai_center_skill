@@ -24,7 +24,9 @@ def cmd_sql_regressions(args: argparse.Namespace, runtime: dict[str, Any]) -> An
             "min_ratio": args.min_ratio,
             "min_mean_ms": args.min_mean_ms,
             "min_calls": args.min_calls,
+            "min_baseline_samples": args.min_baseline_samples,
             "only_regressions": "false" if args.include_stable else None,
+            "include_system_sql": "true" if args.include_system_sql else None,
             "limit": args.limit,
         },
     )
@@ -88,9 +90,19 @@ def _add_sql_trends_commands(sub, runtime: dict[str, Any]) -> None:
     sreg.add_argument("--min-mean-ms", type=float)
     sreg.add_argument("--min-calls", type=int)
     sreg.add_argument(
+        "--min-baseline-samples",
+        type=runtime["_positive_int"],
+        help="Minimum baseline 15m buckets required for candidate regressions (v3.167+ default 4).",
+    )
+    sreg.add_argument(
         "--include-stable",
         action="store_true",
         help="Include non-regressing active digests (passes only_regressions=false); useful during cold start.",
+    )
+    sreg.add_argument(
+        "--include-system-sql",
+        action="store_true",
+        help="Include system/monitoring/internal maintenance SQL normally filtered by default (v3.167+, passes include_system_sql=true).",
     )
     sreg.add_argument("--limit", type=runtime["_positive_int"], default=100)
     sreg.set_defaults(func=runtime["cmd_sql_regressions"])

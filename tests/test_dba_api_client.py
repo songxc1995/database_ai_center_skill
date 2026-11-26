@@ -1018,6 +1018,8 @@ class DbaApiClientTest(unittest.TestCase):
         req0 = RecordingHandler.requests[0]
         self.assertEqual(req0["path"], "/api/v2/dba/sql-trends/regressions")
         self.assertNotIn("only_regressions", req0["query"])
+        self.assertNotIn("include_system_sql", req0["query"])
+        self.assertNotIn("min_baseline_samples", req0["query"])
 
         filtered = self.run_client(
             "sql-regressions",
@@ -1028,12 +1030,16 @@ class DbaApiClientTest(unittest.TestCase):
             "--min-ratio", "2.5",
             "--min-mean-ms", "15.0",
             "--min-calls", "10",
+            "--min-baseline-samples", "6",
             "--include-stable",
+            "--include-system-sql",
             "--limit", "25",
         )
         self.assertEqual(filtered.returncode, 0, filtered.stderr)
         req1 = RecordingHandler.requests[1]
         self.assertEqual(req1["query"]["only_regressions"], ["false"])
+        self.assertEqual(req1["query"]["include_system_sql"], ["true"])
+        self.assertEqual(req1["query"]["min_baseline_samples"], ["6"])
         self.assertEqual(req1["query"]["instance_type"], ["mysql"])
         self.assertEqual(req1["query"]["instance_id"], ["12"])
         self.assertEqual(req1["query"]["recent_hours"], ["6"])
@@ -1042,6 +1048,9 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(req1["query"]["min_mean_ms"], ["15.0"])
         self.assertEqual(req1["query"]["min_calls"], ["10"])
         self.assertEqual(req1["query"]["limit"], ["25"])
+
+        invalid_min_samples = self.run_client("sql-regressions", "--min-baseline-samples", "0")
+        self.assertNotEqual(invalid_min_samples.returncode, 0)
 
     def test_sql_digests_single_and_fan_out(self):
         single = self.run_client(
