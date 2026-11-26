@@ -979,6 +979,124 @@ class DbaApiClientTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(RecordingHandler.requests[0]["query"]["refresh"], ["true"])
 
+    def test_capacity_forecast_forwards_instance_type_and_id(self):
+        result = self.run_client(
+            "capacity-forecast", "--instance-type", "postgres", "--instance-id", "71",
+            "--include-gaps", "--max-days", "90",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        req = RecordingHandler.requests[0]
+        self.assertEqual(req["path"], "/api/v2/dba/capacity/forecast")
+        self.assertEqual(req["query"]["instance_type"], ["postgres"])
+        self.assertEqual(req["query"]["instance_id"], ["71"])
+        self.assertEqual(req["query"]["include_gaps"], ["true"])
+
+    def test_capacity_forecast_series_forwards_params_and_validates_required(self):
+        result = self.run_client(
+            "capacity-forecast-series",
+            "--instance-id", "71",
+            "--metric-name", "cloud_disk_usage_pct",
+            "--window-days", "14",
+            "--projection-days", "30",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        req = RecordingHandler.requests[0]
+        self.assertEqual(req["path"], "/api/v2/dba/capacity/forecast/series")
+        self.assertEqual(req["query"]["instance_id"], ["71"])
+        self.assertEqual(req["query"]["metric_name"], ["cloud_disk_usage_pct"])
+        self.assertEqual(req["query"]["window_days"], ["14"])
+        self.assertEqual(req["query"]["projection_days"], ["30"])
+
+        missing_inst = self.run_client("capacity-forecast-series", "--metric-name", "cloud_disk_usage_pct")
+        self.assertNotEqual(missing_inst.returncode, 0)
+        missing_metric = self.run_client("capacity-forecast-series", "--instance-id", "71")
+        self.assertNotEqual(missing_metric.returncode, 0)
+
+    def test_sql_regressions_include_stable_and_filters(self):
+        default_res = self.run_client("sql-regressions")
+        self.assertEqual(default_res.returncode, 0, default_res.stderr)
+        req0 = RecordingHandler.requests[0]
+        self.assertEqual(req0["path"], "/api/v2/dba/sql-trends/regressions")
+        self.assertNotIn("only_regressions", req0["query"])
+
+        filtered = self.run_client(
+            "sql-regressions",
+            "--instance-type", "mysql",
+            "--instance-id", "12",
+            "--recent-hours", "6",
+            "--baseline-days", "3",
+            "--min-ratio", "2.5",
+            "--min-mean-ms", "15.0",
+            "--min-calls", "10",
+            "--include-stable",
+            "--limit", "25",
+        )
+        self.assertEqual(filtered.returncode, 0, filtered.stderr)
+        req1 = RecordingHandler.requests[1]
+        self.assertEqual(req1["query"]["only_regressions"], ["false"])
+        self.assertEqual(req1["query"]["instance_type"], ["mysql"])
+        self.assertEqual(req1["query"]["instance_id"], ["12"])
+        self.assertEqual(req1["query"]["recent_hours"], ["6"])
+        self.assertEqual(req1["query"]["baseline_days"], ["3"])
+        self.assertEqual(req1["query"]["min_ratio"], ["2.5"])
+        self.assertEqual(req1["query"]["min_mean_ms"], ["15.0"])
+        self.assertEqual(req1["query"]["min_calls"], ["10"])
+        self.assertEqual(req1["query"]["limit"], ["25"])
+
+    def test_sql_digests_single_and_fan_out(self):
+        single = self.run_client(
+            "sql-digests", "--instance-id", "5", "--hours", "48", "--sort", "mean_time_ms", "--limit", "20"
+        )
+        self.assertEqual(single.returncode, 0, single.stderr)
+        req = RecordingHandler.requests[0]
+        self.assertEqual(req["path"], "/api/v2/dba/sql-trends/instances/5/digests")
+        self.assertEqual(req["query"]["hours"], ["48"])
+        self.assertEqual(req["query"]["sort_by"], ["mean_time_ms"])
+        self.assertEqual(req["query"]["limit"], ["20"])
+
+        batch = self.run_client("sql-digests", "--instance-ids", "1,2")
+        self.assertEqual(batch.returncode, 0, batch.stderr)
+        out = json.loads(batch.stdout)
+        self.assertEqual(out["requested"], [1, 2])
+        self.assertEqual(out["returned"], 2)
+        self.assertEqual([r["path"] for r in RecordingHandler.requests[1:]], [
+            "/api/v2/dba/sql-trends/instances/1/digests",
+            "/api/v2/dba/sql-trends/instances/2/digests",
+        ])
+
+    def test_sql_digest_series_quotes_digest_and_rejects_traversal(self):
+        ok = self.run_client(
+            "sql-digest-series", "--instance-id", "5", "--digest-id", "abc+1%2", "--hours", "72", "--limit", "100"
+        )
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        req = RecordingHandler.requests[0]
+        self.assertEqual(req["path"], "/api/v2/dba/sql-trends/instances/5/digests/abc%2B1%252/series")
+        self.assertEqual(req["query"]["hours"], ["72"])
+        self.assertEqual(req["query"]["limit"], ["100"])
+
+        for bad in ("", "..", "../etc/passwd", "a/b"):
+            res = self.run_client("sql-digest-series", "--instance-id", "5", "--digest-id", bad)
+            self.assertEqual(res.returncode, 2)
+            self.assertEqual(json.loads(res.stderr.strip())["error"], "invalid_digest_id")
+
+    def test_sql_trends_coverage_forwards_filters(self):
+        res = self.run_client(
+            "sql-trends-coverage",
+            "--instance-type", "postgres",
+            "--status", "unavailable",
+            "--search", "stat",
+            "--limit", "50",
+            "--offset", "10",
+        )
+        self.assertEqual(res.returncode, 0, res.stderr)
+        req = RecordingHandler.requests[0]
+        self.assertEqual(req["path"], "/api/v2/dba/sql-trends/coverage")
+        self.assertEqual(req["query"]["instance_type"], ["postgres"])
+        self.assertEqual(req["query"]["status"], ["unavailable"])
+        self.assertEqual(req["query"]["search"], ["stat"])
+        self.assertEqual(req["query"]["limit"], ["50"])
+        self.assertEqual(req["query"]["offset"], ["10"])
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -2952,3 +3070,4 @@ def test_a_non_404_failure_on_the_instance_still_degrades(monkeypatch):
     args = argparse.Namespace(instance_id=9999, ip=None, host=None)
     out = client_module.cmd_instance(args)
     assert out["instance"]["unavailable"] is True and out["instance"]["status_code"] == 500
+

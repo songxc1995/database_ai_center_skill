@@ -29,6 +29,7 @@ from dba_client import elk as _elk
 from dba_client import inventory as _inventory
 from dba_client import knowledge as _knowledge
 from dba_client import metadata as _metadata
+from dba_client import sql_trends as _sql_trends
 
 
 READ_TIMEOUT_DEFAULT = 15
@@ -1606,6 +1607,26 @@ def cmd_capacity_forecast(args: argparse.Namespace) -> Any:
     return _cost.cmd_capacity_forecast(args, globals())
 
 
+def cmd_capacity_forecast_series(args: argparse.Namespace) -> Any:
+    return _cost.cmd_capacity_forecast_series(args, globals())
+
+
+def cmd_sql_regressions(args: argparse.Namespace) -> Any:
+    return _sql_trends.cmd_sql_regressions(args, globals())
+
+
+def cmd_sql_digests(args: argparse.Namespace) -> Any:
+    return _sql_trends.cmd_sql_digests(args, globals())
+
+
+def cmd_sql_digest_series(args: argparse.Namespace) -> Any:
+    return _sql_trends.cmd_sql_digest_series(args, globals())
+
+
+def cmd_sql_trends_coverage(args: argparse.Namespace) -> Any:
+    return _sql_trends.cmd_sql_trends_coverage(args, globals())
+
+
 def cmd_silence_report(args: argparse.Namespace) -> Any:
     return _alerts.cmd_silence_report(args, globals())
 
@@ -2023,6 +2044,10 @@ def _add_cost_commands(sub) -> None:
     return _cost._add_cost_commands(sub, globals())
 
 
+def _add_sql_trends_commands(sub) -> None:
+    return _sql_trends._add_sql_trends_commands(sub, globals())
+
+
 def build_parser() -> argparse.ArgumentParser:
     """命令定义按域分在 _add_*_commands 里。
 
@@ -2041,6 +2066,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_inventory_commands(sub)
     _add_diagnostic_commands(sub)
     _add_capacity_commands(sub)
+    _add_sql_trends_commands(sub)
     _add_knowledge_commands(sub)
     _add_elk_commands(sub)
     _add_cost_commands(sub)

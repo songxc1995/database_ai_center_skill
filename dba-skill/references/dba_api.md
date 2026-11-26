@@ -363,6 +363,24 @@ everywhere rather than concluding "nothing is suppressed" after looking at two.
 `would_alert` is a field, not a filter. A tablespace 200 days from full will never appear in
 the alert list, and that lead time is the entire reason to ask.
 
+Two reading traps when acting on projections:
+
+- **Fewer than 5 daily points (such as newly onboarded cloud-disk day aggregates) always yields `goodness: 1.0`** when only 2 points exist. Check `points` and read `capacity-forecast-series`'s `reason` (`too few points`) before trusting a 2-point slope as a confident forecast.
+- **High current usage with a gentle slope can still be urgent.** Sorting only by `days_to_cross` buries an instance already above 95% whose daily delta is small; inspect high `current` rows alongside short lead times.
+
+## SQL digest trends: empty regressions is not "no slow SQL"
+
+`sql-regressions` compares each digest's recent window against the preceding `baseline_days`
+window from platform-collected 15-minute digest deltas (no live source connection):
+
+- **Read `coverage` first, and drill into blind spots with `sql-trends-coverage`.** Instances in
+  `unavailable` (disabled `performance_schema`, missing `pg_stat_statements`, privilege denial,
+  or source timeout) or `unsupported` (agentless without credentials, unsupported engine) never
+  produce regressions.
+- **Cold-start and `warming_up` instances have no baseline yet.** During the first 24 hours of
+  collection (`baseline_calls = 0`), `only_regressions=true` returns an empty list even for slow
+  queries; pass `--include-stable` or use `sql-digests` to inspect current high-latency digests.
+
 ## Freshness before conclusions
 
 `freshness --instance-id N` says how current the data is. A healthy-looking instance whose

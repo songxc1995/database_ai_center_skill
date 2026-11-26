@@ -6,6 +6,9 @@ import argparse
 from typing import Any
 
 
+_FORECAST_ENGINES = ("mysql", "postgres", "postgresql", "oracle", "tidb", "clickhouse", "sqlserver")
+
+
 def cmd_capacity_forecast(args: argparse.Namespace, runtime: dict[str, Any]) -> Any:
     """Projected resource exhaustion — including trends too far out to alert.
 
@@ -19,9 +22,25 @@ def cmd_capacity_forecast(args: argparse.Namespace, runtime: dict[str, Any]) -> 
         "/dba/capacity/forecast",
         params={
             "metric_name": args.metric_name,
+            "instance_type": args.instance_type,
+            "instance_id": args.instance_id,
             "max_days": args.max_days,
             "include_gaps": "true" if args.include_gaps else None,
             "limit": args.limit,
+        },
+    )
+
+
+def cmd_capacity_forecast_series(args: argparse.Namespace, runtime: dict[str, Any]) -> Any:
+    """Daily peak history, Theil-Sen fit, and forward extrapolation series (v3.166+)."""
+    return runtime["_request"](
+        "GET",
+        "/dba/capacity/forecast/series",
+        params={
+            "instance_id": args.instance_id,
+            "metric_name": args.metric_name,
+            "window_days": args.window_days,
+            "projection_days": args.projection_days,
         },
     )
 
@@ -175,10 +194,27 @@ def _add_capacity_commands(sub, runtime: dict[str, Any]) -> None:
         help="Projected exhaustion incl. trends below the alert threshold (v3.32+)",
     )
     capf.add_argument("--metric-name")
+    capf.add_argument("--instance-type", choices=list(_FORECAST_ENGINES))
+    capf.add_argument("--instance-id", type=runtime["_positive_int"])
     capf.add_argument("--max-days", type=float)
     capf.add_argument("--include-gaps", action="store_true")
     capf.add_argument("--limit", type=runtime["_positive_int"], default=500)
     capf.set_defaults(func=runtime["cmd_capacity_forecast"])
+
+    capfs = sub.add_parser(
+        "capacity-forecast-series",
+        help="Daily peak history, fitted line and extrapolation points for one capacity metric (v3.166+)",
+    )
+    capfs.add_argument("--instance-id", type=int)
+    capfs.set_defaults(_needs_instance=True)
+    capfs.add_argument(
+        "--instance-ids",
+        help="Comma-separated ids: run this for each and return one array. Every id lands in `items` or in `failed` — none is silently dropped.",
+    )
+    capfs.add_argument("--metric-name", required=True)
+    capfs.add_argument("--window-days", type=int)
+    capfs.add_argument("--projection-days", type=int)
+    capfs.set_defaults(func=runtime["cmd_capacity_forecast_series"])
 
     mseries = sub.add_parser(
         "metric-series",

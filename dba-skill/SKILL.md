@@ -347,6 +347,7 @@ The commands above (`resolve`, `context`, `alert-evidence`, `alerts`, `classific
 `inventory-summary`, `databases-search`, `databases-unused`, `ownership-scope`,
 `directory-options`, `freshness`, `sweeps`, `timeline`, `diagnostics-catalog`, `diagnostics-run`,
 `probe-catalog`, `probe-run`, `prometheus-query`, `elk-status`, `elk-coverage`, `elk-search`,
+`capacity-forecast`, `capacity-forecast-series`, `sql-regressions`, `sql-digests`, `sql-digest-series`, `sql-trends-coverage`,
 `cloud-monitoring-coverage`, `cloud-rightsizing`, `cloud-savings-realized`,
 `cloud-cost-history`, `business-inference-evidence`, `backups`) are the **analysis core group** — the high-value read endpoints
 you should reach for first. They cover most alert, ownership, inventory, and live-evidence
@@ -394,6 +395,11 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `alert-evidence` | `GET /dba/alerts/{alert_id}/evidence` |
 | `silence-report` | `GET /dba/instances/{instance_id}/silence-report` |
 | `capacity-forecast` | `GET /dba/capacity/forecast` |
+| `capacity-forecast-series` | `GET /dba/capacity/forecast/series` (3.166+) — 日峰值与 Theil-Sen 外推轨迹 |
+| `sql-regressions` | `GET /dba/sql-trends/regressions` (3.165+) — SQL 摘要耗时退化对比 |
+| `sql-digests` | `GET /dba/sql-trends/instances/{instance_id}/digests` (3.165+) — 单实例 Top SQL 摘要 |
+| `sql-digest-series` | `GET /dba/sql-trends/instances/{instance_id}/digests/{digest_id}/series` (3.165+) — 15m 分桶趋势 |
+| `sql-trends-coverage` | `GET /dba/sql-trends/coverage` (3.166+) — 全舰队 SQL 采集覆盖 5 态与不可用原因 |
 | `backups` | `GET /instances/{instance_id}/backups` |
 | `backups-coverage` | `GET /dba/backups/coverage` |
 | `classification` | `GET /instances/classification` |
