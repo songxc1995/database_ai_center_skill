@@ -363,10 +363,14 @@ everywhere rather than concluding "nothing is suppressed" after looking at two.
 `would_alert` is a field, not a filter. A tablespace 200 days from full will never appear in
 the alert list, and that lead time is the entire reason to ask.
 
-Two reading traps when acting on projections:
+Two reading traps (and one cloud auto-expansion rule) when acting on projections:
 
 - **Fewer than 5 daily points (such as newly onboarded cloud-disk day aggregates) always yields `goodness: 1.0`** when only 2 points exist. On `v3.167+`, check `low_sample` (`true` when `points < min_points`) and `confidence` (`"high" | "medium" | "low"`), plus `points` and `capacity-forecast-series`'s `reason` (`too few points`), before trusting a 2-point slope as a confident forecast.
 - **High current usage with a gentle slope can still be urgent.** On `v3.167+`, items where `current >= min(90.0, ceiling - 5.0)` carry `high_watermark: true` and are sorted to the top of `capacity-forecast` ahead of lower-usage items with shorter `days_to_cross` (and retained in weekly inspection `capacity_risks` with `high_watermark_count`). On older servers, inspect high `current` rows manually alongside short lead times.
+- **Cloud disk auto-expansion (`v3.168+`, `storage_auto_expand` on `cloud_disk_usage_pct` and `cloud-rightsizing`):**
+  - When collected (`source="aliyun_das"` or `"huawei_rds"`), `storage_auto_expand` reports `enabled`, `max_storage_gb`, `trigger_used_pct` (normalized so Huawei's *free %* `trigger_threshold` becomes `100 - trigger_threshold`), `effective_usage_pct` (`used_gb / max_storage_gb`), `days_to_max_storage`, `protected`, and `at_limit`.
+  - `protected: true` (`enabled=true`, current `< max_storage_gb`, and `effective_usage_pct` still safely below high-water floor) means crossing current disk size will trigger provider auto-expansion rather than immediate out-of-space downtime: do **not** report it as an imminent outage risk unless `days_to_max_storage` approaches `max_storage_gb`; instead warn about auto-expansion spend (and note cloud disks generally cannot shrink back down).
+  - `at_limit: true` (disk already reached `max_storage_gb` or `effective_usage_pct` hit high watermark) or `enabled: false` with high utilization carries **real** full-disk risk and remains prioritized at the top. `storage_auto_expand: null` means the policy has not been collected yet or the provider endpoint did not expose one — do not assume auto-expansion is enabled.
 
 ## SQL digest trends: empty regressions is not "no slow SQL"
 

@@ -394,7 +394,7 @@ What follows is only the **command → endpoint** mapping, which discovery genui
 | `alerts-list` | `GET /alerts` (compat path) |
 | `alert-evidence` | `GET /dba/alerts/{alert_id}/evidence` |
 | `silence-report` | `GET /dba/instances/{instance_id}/silence-report` |
-| `capacity-forecast` | `GET /dba/capacity/forecast` (3.167+: 置顶 ≥90% 高水位风险，返回 `high_watermark` / `low_sample` / `confidence`) |
+| `capacity-forecast` | `GET /dba/capacity/forecast` (3.167+ 置顶 ≥90% 高水位风险与置信度; 3.168+ 附带云盘自动扩展 `storage_auto_expand` 保护/触顶状态) |
 | `capacity-forecast-series` | `GET /dba/capacity/forecast/series` (3.166+) — 日峰值与 Theil-Sen 外推轨迹 |
 | `sql-regressions` | `GET /dba/sql-trends/regressions` (3.165+; 3.167+ 默认过滤系统 SQL 与 <4 桶未成熟基线，可用 `--include-system-sql` / `--min-baseline-samples` 覆盖) — SQL 摘要耗时退化对比 |
 | `sql-digests` | `GET /dba/sql-trends/instances/{instance_id}/digests` (3.165+) — 单实例 Top SQL 摘要 |
